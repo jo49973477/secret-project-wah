@@ -1,5 +1,45 @@
 # Sensor dependency preflight
 
+## Automated setup and checks (WAH)
+
+The repository provides `scripts/setup_sensor_dependencies.sh` to handle the
+reviewed **Linux x86_64 / Python 3.12 / PyTorch 2.9.0+cu128** combination.
+Use the target WAH `.venv`; create/synchronize its **base** environment first
+(`uv sync --locked`) if needed, **before** manually installing sensors:
+
+```bash
+# Read-only: inspect the current installation and run the WAH import preflight.
+bash scripts/setup_sensor_dependencies.sh --check
+
+# Explicitly opt in to install pinned wheels + official Concerto, then check.
+bash scripts/setup_sensor_dependencies.sh --install
+
+# Optional: test actual one-GPU torch-scatter/spconv forward and backward CUDA ops.
+CUDA_VISIBLE_DEVICES=0 bash scripts/setup_sensor_dependencies.sh --gpu-smoke
+```
+
+The script never runs `uv sync`, deletes packages, changes the CUDA driver,
+replaces Torch/torchvision/Transformers/FlashAttention, loads GR00T weights, or
+launches training. `--install` first verifies exact versions and refuses an
+unknown OS/architecture/build; it also refuses conflicting installed sparse
+packages. It uses `--no-deps` to keep the existing core libraries intact.
+The official Concerto revision is pinned and built with `setuptools==80.9.0`
+and `--no-build-isolation` because upstream `setup.py` still imports removed
+`pkg_resources`. If a required support package is absent, inspect the failure
+and resolve it intentionally rather than automatically replacing core packages.
+
+`--check` validates imports, the official Concerto API, trainctl presence and
+the same Hydra-based sensor preflight used before training. `--gpu-smoke` adds
+a minimal CUDA operator/backward smoke test but **does not** establish BF16
+Concerto checkpoint behavior or multi-GPU ZeRO-3 correctness. For that, use
+the full diagnostic described below with representative real point-cloud data.
+
+Running `uv sync` again can remove separately installed sensor wheels and
+Concerto because they are not currently locked into the base project
+dependencies; rerun `--install` after any such sync. To support different
+hardware, design an appropriate wheel/source-build matrix before extending
+the guarded installer.
+
 `scripts/train_hydra.py` now checks enabled sensor imports once in the parent,
 before dataset/resume access, output snapshots, Torchrun, or GR00T loading.
 `scripts/train_univtac_sidecar.py` and its shell wrapper delegate to that same
