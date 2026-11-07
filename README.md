@@ -19,6 +19,7 @@
 - [NVIDIA Isaac GR00T](#nvidia-isaac-gr00t)
 - [What's New in GR00T N1.7](#whats-new-in-gr00t-n17)
 - [Installation](#installation)
+- [WAH UniVTAC Sensor Dependencies](#wah-univtac-sensor-dependencies)
 - [LeRobot Integration](#lerobot-integration)
 - [Model Checkpoints & Embodiment Tags](#model-checkpoints--embodiment-tags)
 - [Data Format](#data-format)
@@ -200,6 +201,69 @@ Verify the installation:
 ```sh
 uv run python -c "import gr00t; print('GR00T installed successfully')"
 ```
+
+#### WAH UniVTAC Sensor Dependencies
+
+WAH's Concerto point encoder (`concerto_small` / `concerto_base`) also requires
+`spconv.pytorch`, `torch_scatter`, and the **official** Pointcept `concerto` package.
+Training checks these imports **before launching workers**; a
+`SensorDependencyError` means the required modules are unavailable in the
+Python environment that starts training. See
+[the full sensor dependency and preflight guide](docs/sensor_dependencies.md)
+for other encoder choices, support packages, and GPU kernel validation.
+
+The following is a **candidate setup for Linux x86_64, Python 3.12,
+PyTorch 2.9.0+cu128**. Do not reuse these binary wheel versions for a different
+Torch/CUDA/Python combination. First check the existing stack:
+
+```bash
+.venv/bin/python -c 'import torch, sys; print(sys.version); print(torch.__version__, torch.version.cuda)'
+uv pip list --python .venv/bin/python
+```
+
+Install the matching [PyG CUDA 12.8 / Torch 2.9 wheel](https://data.pyg.org/whl/torch-2.9.0+cu128.html)
+and the reviewed spconv/cumm CUDA 12.6 candidates:
+
+```bash
+uv pip install --python .venv/bin/python --no-deps --only-binary=:all: --no-index \
+  --find-links 'https://data.pyg.org/whl/torch-2.9.0+cu128.html' \
+  'torch-scatter==2.1.2+pt29cu128'
+
+uv pip install --python .venv/bin/python --no-deps --only-binary=:all: \
+  'spconv-cu126==2.3.8' 'cumm-cu126==0.7.11'
+```
+
+The `spconv-cu126` suffix does **not** by itself prove incompatibility with
+cu128 Torch, but import success alone does not prove the sparse CUDA forward
+and backward kernels work. `--no-deps` protects the existing GR00T stack
+against automatic replacements; it also means you must review any missing
+spconv/Concerto support packages using the detailed guide.
+
+**Concerto build error: `No module named 'pkg_resources'`.** Its upstream
+`setup.py` still imports `pkg_resources`, which was removed from newer
+setuptools. Install an older setuptools in this same venv, and disable
+isolated building for *this* installation:
+
+```bash
+uv pip install --python .venv/bin/python 'setuptools==80.9.0' wheel
+.venv/bin/python -c 'import pkg_resources; print("pkg_resources OK")'
+uv pip install --python .venv/bin/python --no-deps --no-build-isolation \
+  'git+https://github.com/Pointcept/Concerto.git'
+```
+
+Check the installed imports without loading a GR00T checkpoint:
+
+```bash
+.venv/bin/python -c 'import torch, spconv.pytorch, torch_scatter, concerto; print(torch.__version__, "sensor imports OK")'
+```
+
+**Important:** A later `uv sync` may remove these manually installed packages
+unless they are declared in the project's locked dependencies. Install them
+*after* syncing the base environment, and avoid using bare `uv run` for
+validation (it can re-sync); WAH's ablation launcher uses `uv run --no-sync`.
+For a reproducible environment, integrate compatible optional packages into
+the project dependency configuration and lockfile. Do not downgrade Torch,
+Transformers, or FlashAttention to follow Concerto's standalone Conda example.
 
 > **Hugging Face access (required):** GR00T's VLM backbone is [`nvidia/Cosmos-Reason2-2B`](https://huggingface.co/nvidia/Cosmos-Reason2-2B), a **gated** model that every GR00T checkpoint (including the base `nvidia/GR00T-N1.7-3B`) loads on first use. Before running inference or finetuning, request access on the model page and authenticate:
 > ```sh
