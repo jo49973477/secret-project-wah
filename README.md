@@ -212,6 +212,21 @@ Python environment that starts training. See
 [the full sensor dependency and preflight guide](docs/sensor_dependencies.md)
 for other encoder choices, support packages, and GPU kernel validation.
 
+**Quick automated setup** (from the repository root, after the base `uv sync --locked`):
+
+```bash
+bash scripts/setup_sensor_dependencies.sh --check    # Check only; no installation
+bash scripts/setup_sensor_dependencies.sh --install  # Pinned sensor install + recheck
+CUDA_VISIBLE_DEVICES=0 bash scripts/setup_sensor_dependencies.sh --gpu-smoke  # Optional CUDA kernels
+```
+
+`--install` refuses unreviewed platforms or incompatible core package versions.
+It never runs `uv sync`, changes the driver, or replaces Torch/Transformers/
+FlashAttention. `--gpu-smoke` tests basic GPU operators, not full Concerto BF16
+or ZeRO-3 training. See [sensor setup details](docs/sensor_dependencies.md).
+
+**Manual fallback / package details:**
+
 The following is a **candidate setup for Linux x86_64, Python 3.12,
 PyTorch 2.9.0+cu128**. Do not reuse these binary wheel versions for a different
 Torch/CUDA/Python combination. First check the existing stack:
