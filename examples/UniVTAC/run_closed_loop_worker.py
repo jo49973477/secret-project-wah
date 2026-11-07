@@ -29,6 +29,9 @@ from univtac_rollout.core import (
 from univtac_rollout.policy import Gr00tUniVTACPolicy
 from univtac_rollout.sensors import UniVTACSensorAdapter
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from univtac_progress import emit_event  # noqa: E402
+
 
 class UnsupportedRuntimeError(RuntimeError):
     def __init__(self, message: str, metadata: dict[str, Any]):
@@ -933,6 +936,13 @@ def _run(
                 f"count={episode_index + 1}/{args.episodes} task={args.task} seed={seed} "
                 f"result={termination_reason} actions={result.num_steps} "
                 f"elapsed={result.elapsed_seconds:.2f}s video={video_path or 'MISSING'}",
+            )
+            status = "error" if result.success is None else "success" if result.success else "failure"
+            emit_event(
+                "episode",
+                task=args.task,
+                index=episode_index,
+                status=status,
             )
 
         _write_worker_results(

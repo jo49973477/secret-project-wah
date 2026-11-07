@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "examples" / "UniVTAC"))
 from univtac_rollout.checkpoint import checkpoint_identity  # noqa: E402
 from univtac_rollout.client import MinimalPolicyClient  # noqa: E402
 from univtac_rollout.multimodal import load_sensor_contract, validate_contract  # noqa: E402
+from univtac_progress import RolloutProgress  # noqa: E402
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -104,7 +105,13 @@ def probe(
 
 
 def wait_ready(args: argparse.Namespace, server: subprocess.Popen | None) -> dict:
-    deadline = time.monotonic() + args.startup_timeout
+    started = time.monotonic()
+    deadline = started + args.startup_timeout
+    last_report = started
+    print(
+        f"Waiting for GR00T server readiness (timeout {args.startup_timeout:g}s)...",
+        flush=True,
+    )
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if server is not None and server.poll() is not None:
@@ -122,6 +129,14 @@ def wait_ready(args: argparse.Namespace, server: subprocess.Popen | None) -> dic
             )
         except (ConnectionError, TimeoutError, OSError) as exc:
             last_error = exc
+            now = time.monotonic()
+            if now - last_report >= 10:
+                print(
+                    f"Still loading GR00T server... {int(now - started)}s elapsed "
+                    f"(last probe: {type(exc).__name__})",
+                    flush=True,
+                )
+                last_report = now
             time.sleep(min(args.retry_interval, max(0, deadline - time.monotonic())))
     raise TimeoutError(
         f"Policy server readiness timed out after {args.startup_timeout}s: {last_error}"
@@ -378,11 +393,13 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
             f"Server ready: {info['checkpoint_identity']} {info['policy_type']} {info.get('sidecar_type')}",
             flush=True,
         )
+        print(f"Starting UniVTAC rollout (live progress; detailed logs: {logs})", flush=True)
         cmd = build_rollout_command(args, output, passthrough)
         sim_env = os.environ.copy()
         if args.sim_visible_devices is not None:
             sim_env["CUDA_VISIBLE_DEVICES"] = args.sim_visible_devices
-        rollout_log = (logs / "rollout.log").open("w", encoding="utf-8")
+        rollout_log_path = logs / "rollout.log"
+        rollout_log = rollout_log_path.open("w", encoding="utf-8")
         rollout = subprocess.Popen(
             cmd,
             cwd=ROOT,
@@ -394,14 +411,35 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
 
         log_offsets: dict[Path, int] = {}
         log_tails: dict[Path, str] = {}
+        progress = RolloutProgress()
 
         def monitor() -> None:
-            while not monitor_stop.wait(2):
-                for row in gpu_memory():
-                    key = str(row["index"])
-                    memory["peak_used_mib"][key] = max(
-                        memory["peak_used_mib"].get(key, 0), row["used_mib"]
-                    )
+            rollout_offset = 0
+            pending_line = ""
+            last_gpu_sample = 0.0
+
+            def drain_rollout_log() -> None:
+                nonlocal rollout_offset, pending_line
+                with rollout_log_path.open(encoding="utf-8", errors="replace") as stream:
+                    stream.seek(rollout_offset)
+                    pending_line += stream.read()
+                    rollout_offset = stream.tell()
+                while "\n" in pending_line:
+                    line, pending_line = pending_line.split("\n", 1)
+                    progress.consume(line)
+
+            while True:
+                drain_rollout_log()
+                progress.render()
+
+                now = time.monotonic()
+                if now - last_gpu_sample >= 2:
+                    last_gpu_sample = now
+                    for row in gpu_memory():
+                        key = str(row["index"])
+                        memory["peak_used_mib"][key] = max(
+                            memory["peak_used_mib"].get(key, 0), row["used_mib"]
+                        )
                 if not memory["after_sim_init"]:
                     for task_log in logs.glob("*.log"):
                         if task_log.name in {"server.log", "rollout.log"}:
@@ -416,6 +454,13 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
                         if "phase=task_construction: complete" in tail:
                             memory["after_sim_init"] = gpu_memory()
                             break
+                if monitor_stop.wait(0.5):
+                    # The child may have flushed its final event after our
+                    # previous read; drain again before printing the summary.
+                    drain_rollout_log()
+                    if pending_line:
+                        progress.consume(pending_line)
+                    return
 
         monitor_thread = threading.Thread(target=monitor, daemon=True)
         monitor_thread.start()
@@ -435,6 +480,7 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
         monitor_stop.set()
         monitor_thread.join(timeout=3)
         rollout_log.flush()
+        progress.finish()
         summary = print_rollout_summary(output, logs)
         if summary is not None and summary["total_errors"] > 0 and code == 0:
             code = 1
@@ -456,6 +502,8 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
         monitor_stop.set()
         if monitor_thread is not None:
             monitor_thread.join(timeout=3)
+        if "progress" in locals():
+            progress.finish()
         stop_owned(rollout)
         stop_owned(server)
         if server_log is not None:
