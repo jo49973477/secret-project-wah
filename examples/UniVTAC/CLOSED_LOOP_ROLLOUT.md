@@ -89,6 +89,23 @@ rollout. These observations are warnings, not a guarantee that a 24 GB card
 can fit both processes. CUDA OOM and process crashes preserve logs and exit
 nonzero. `--startup-timeout` and `--retry-interval` control readiness waiting.
 
+Both local and split launchers show live rollout progress in the terminal:
+
+```text
+Task 1/4: lift_can
+WAH [━━╺╺╺╺╺╺╺╺╺╺╺╺╺╺] 50/400 12.5% | ✓43 ✗6 !1 | lift_can | 860s ETA 6020s
+```
+
+The bar advances on **completed episodes** (not inference steps), with an
+overall total across all selected tasks. `✓` means simulation success, `✗`
+means a valid rollout that did not succeed, and `!` means an invalid action or
+evaluation error; ETA is estimated from elapsed time. An interactive terminal
+updates one line in place, while redirected output/SSH jobs without a TTY print
+a plain progress line per episode. Server initialization also prints a heartbeat
+every 10 seconds. Full Isaac diagnostics remain in `logs/rollout.log` and
+per-task `logs/<task>.log`; model-server diagnostics remain in `logs/server.log`.
+The final `summary.json` stays authoritative.
+
 ### WAH Temporal and MoE smoke rollouts
 
 For either launcher, choose a complete checkpoint for the desired Temporal or

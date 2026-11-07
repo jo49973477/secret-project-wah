@@ -24,6 +24,11 @@ from univtac_rollout.core import (
 )
 from univtac_rollout.policy import Gr00tUniVTACPolicy
 
+# Allow the rollout driver to emit progress events without depending on the
+# model environment or on any optional terminal UI package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from univtac_progress import emit_event  # noqa: E402
+
 
 MODE_EPISODES = {"smoke": 5, "quick": 20, "full": 100}
 
@@ -152,7 +157,9 @@ def _stream_process(command: list[str], *, cwd: Path, log_path: Path) -> Process
         )
         assert process.stdout is not None
         for line in process.stdout:
-            print(line, end="")
+            # This stdout is redirected into rollout.log by local/split mode.
+            # Flush each worker event so the parent can show live progress.
+            print(line, end="", flush=True)
             log.write(line)
             log.flush()
         return_code = process.wait()
@@ -238,7 +245,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     all_episodes: list[EpisodeResult] = []
     runtime_metadata: dict[str, Any] = {}
 
+    emit_event("start", total=len(tasks) * episodes_per_task)
+
     for task_index, task in enumerate(tasks):
+        emit_event("task", task=task, index=task_index + 1, task_count=len(tasks))
         result_json = result_dir / f"{task}.json"
         command = [
             *python_command,
