@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from typing import Any
 
 import msgpack
 import numpy as np
 import zmq
+
+from .profiling import GLOBAL_PROFILER, RuntimeProfiler
 
 
 def _dict_get(mapping: dict[Any, Any], key: str, default: Any = None) -> Any:
@@ -82,11 +85,20 @@ class CompatibleMsgSerializer:
 class MinimalPolicyClient:
     """Only the endpoints needed by UniVTAC, with explicit timeout recovery."""
 
-    def __init__(self, host: str, port: int, *, timeout_ms: int = 300_000):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout_ms: int = 300_000,
+        profiler: RuntimeProfiler | None = None,
+    ):
         self.host = host
         self.port = port
         self.timeout_ms = timeout_ms
         self._closed = False
+        self.profiler = profiler or GLOBAL_PROFILER
+        self.last_call_timings: dict[str, float] = {}
         self.context = zmq.Context()
         self.socket: zmq.Socket
         self._init_socket()
@@ -106,8 +118,24 @@ class MinimalPolicyClient:
         if data is not None:
             request["data"] = data
         try:
-            self.socket.send(CompatibleMsgSerializer.to_bytes(request))
-            response = CompatibleMsgSerializer.from_bytes(self.socket.recv())
+            serialization_started = time.perf_counter_ns()
+            request_bytes = CompatibleMsgSerializer.to_bytes(request)
+            serialization_ns = time.perf_counter_ns() - serialization_started
+            self.profiler.record_ns("inference.request_serialization", serialization_ns)
+            request_started = time.perf_counter_ns()
+            self.socket.send(request_bytes)
+            response_bytes = self.socket.recv()
+            request_ns = time.perf_counter_ns() - request_started
+            self.profiler.record_ns("inference.server_round_trip", request_ns)
+            decoding_started = time.perf_counter_ns()
+            response = CompatibleMsgSerializer.from_bytes(response_bytes)
+            decoding_ns = time.perf_counter_ns() - decoding_started
+            self.profiler.record_ns("inference.response_decoding", decoding_ns)
+            self.last_call_timings = {
+                "serialization_ms": serialization_ns / 1_000_000,
+                "round_trip_ms": request_ns / 1_000_000,
+                "response_decoding_ms": decoding_ns / 1_000_000,
+            }
         except zmq.error.Again as exc:
             self._init_socket()
             raise TimeoutError(
@@ -123,7 +151,17 @@ class MinimalPolicyClient:
         return isinstance(response, dict) and response.get("status") == "ok"
 
     def get_action(self, observation: dict[str, Any]) -> Any:
-        return self.call("get_action", {"observation": observation, "options": None})
+        response = self.call("get_action", {"observation": observation, "options": None})
+        if (
+            isinstance(response, (list, tuple))
+            and len(response) == 2
+            and isinstance(response[1], dict)
+        ):
+            server_ms = response[1].get("__server_inference_ms")
+            if isinstance(server_ms, (int, float)):
+                self.last_call_timings["server_inference_ms"] = float(server_ms)
+                self.profiler.record_ms("inference.server_inference", float(server_ms))
+        return response
 
     def reset(self) -> Any:
         return self.call("reset", {"options": None})

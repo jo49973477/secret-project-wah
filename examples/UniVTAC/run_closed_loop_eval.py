@@ -9,25 +9,32 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
 from univtac_rollout.core import (
     DEFAULT_GRIPPER_LIMIT_TOLERANCE_M,
     EpisodeResult,
+    classify_result,
     resolve_tasks,
     write_results,
 )
+from univtac_rollout.dashboard import RolloutDashboard
 from univtac_rollout.policy import Gr00tUniVTACPolicy
-
-# Allow the rollout driver to emit progress events without depending on the
-# model environment or on any optional terminal UI package.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from univtac_progress import emit_event  # noqa: E402
+from univtac_rollout.profiling import GLOBAL_PROFILER
+from univtac_rollout.telemetry import (
+    DIAGNOSTIC_LEVELS,
+    LOG_LEVELS,
+    EventReader,
+    EventWriter,
+    RolloutAggregator,
+)
 
 
 MODE_EPISODES = {"smoke": 5, "quick": 20, "full": 100}
@@ -70,6 +77,20 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/univtac_rollout_eval"))
     parser.add_argument(
+        "--event-log",
+        type=Path,
+        help="Structured JSONL telemetry path (default: OUTPUT/logs/rollout_events.jsonl).",
+    )
+    parser.add_argument("--rollout-diagnostics", choices=DIAGNOSTIC_LEVELS, default="standard")
+    parser.add_argument("--diagnostic-sample-every", type=int, default=10)
+    parser.add_argument("--dashboard", choices=("auto", "on", "off"), default="auto")
+    parser.add_argument("--dashboard-refresh", type=float, default=1.0)
+    parser.add_argument("--episode-telemetry-interval", type=float, default=1.0)
+    parser.add_argument("--stall-warning-seconds", type=float, default=30.0)
+    parser.add_argument("--log-level", choices=LOG_LEVELS, default="normal")
+    parser.add_argument("--profile-runtime", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gpu-sync-profile", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
         "--python-command",
         default=sys.executable,
         help="Isaac Python command, e.g. '/path/to/IsaacLab/isaaclab.sh -p'.",
@@ -102,6 +123,15 @@ def _validate(args: argparse.Namespace) -> tuple[list[str], int]:
         raise ValueError("--request-timeout-seconds must be positive.")
     if not math.isfinite(args.gripper_limit_tolerance_m) or args.gripper_limit_tolerance_m < 0:
         raise ValueError("--gripper-limit-tolerance-m must be finite and nonnegative.")
+    if getattr(args, "diagnostic_sample_every", 10) < 1:
+        raise ValueError("--diagnostic-sample-every must be positive.")
+    dashboard_refresh = getattr(args, "dashboard_refresh", 1.0)
+    if not math.isfinite(dashboard_refresh) or dashboard_refresh <= 0:
+        raise ValueError("--dashboard-refresh must be finite and positive.")
+    for name in ("episode_telemetry_interval", "stall_warning_seconds"):
+        value = getattr(args, name, 1.0)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be finite and positive.")
     if args.expected_python is not None:
         expected = args.expected_python.expanduser().absolute()
         actual = Path(sys.executable).absolute()
@@ -138,14 +168,21 @@ def _load_worker_result(
     )
 
 
-def _stream_process(command: list[str], *, cwd: Path, log_path: Path) -> ProcessOutcome:
+def _stream_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    on_output: Any = None,
+    echo: bool = True,
+    poll_seconds: float = 0.2,
+) -> ProcessOutcome:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
-    with log_path.open("w", encoding="utf-8") as log:
+    with log_path.open("w", encoding="utf-8", buffering=64 * 1024) as log:
         log.write("Command: " + shlex.join(command) + "\n\n")
         log.flush()
         environment = os.environ.copy()
-        environment["PYTHONUNBUFFERED"] = "1"
         process = subprocess.Popen(
             command,
             cwd=cwd,
@@ -156,12 +193,45 @@ def _stream_process(command: list[str], *, cwd: Path, log_path: Path) -> Process
             bufsize=1,
         )
         assert process.stdout is not None
-        for line in process.stdout:
-            # This stdout is redirected into rollout.log by local/split mode.
-            # Flush each worker event so the parent can show live progress.
-            print(line, end="", flush=True)
-            log.write(line)
-            log.flush()
+        output_queue: queue.Queue[str | None] = queue.Queue(maxsize=1024)
+
+        def read_output() -> None:
+            try:
+                for child_line in process.stdout:
+                    output_queue.put(child_line)
+            finally:
+                output_queue.put(None)
+
+        reader = threading.Thread(target=read_output, name="worker-stdout", daemon=True)
+        reader.start()
+        output_finished = False
+        last_log_flush = time.monotonic()
+        while not output_finished or process.poll() is None:
+            try:
+                line = output_queue.get(timeout=poll_seconds)
+            except queue.Empty:
+                line = ""
+            if line is None:
+                output_finished = True
+            elif line:
+                if echo:
+                    print(line, end="")
+                write_started_ns = time.perf_counter_ns()
+                log.write(line)
+                GLOBAL_PROFILER.record_ns(
+                    "monitoring.log_writing", time.perf_counter_ns() - write_started_ns
+                )
+            now = time.monotonic()
+            if now - last_log_flush >= 1.0:
+                flush_started_ns = time.perf_counter_ns()
+                log.flush()
+                GLOBAL_PROFILER.record_ns(
+                    "monitoring.log_flush", time.perf_counter_ns() - flush_started_ns
+                )
+                last_log_flush = now
+            if on_output is not None:
+                on_output()
+        reader.join(timeout=1.0)
         return_code = process.wait()
         elapsed = time.perf_counter() - started
         signal_name = None
@@ -175,7 +245,8 @@ def _stream_process(command: list[str], *, cwd: Path, log_path: Path) -> Process
             f"pid={process.pid} return_code={return_code} "
             f"signal={signal_name or 'none'} elapsed_seconds={elapsed:.3f}\n"
         )
-        print(footer, end="", flush=True)
+        if echo:
+            print(footer, end="", flush=True)
         log.write(footer)
         log.flush()
         return ProcessOutcome(return_code, signal_name, elapsed)
@@ -220,6 +291,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     output_dir.mkdir(parents=True, exist_ok=True)
     result_dir.mkdir(parents=True, exist_ok=True)
+    event_log = (
+        getattr(args, "event_log", None) or output_dir / "logs" / "rollout_events.jsonl"
+    ).resolve()
+    GLOBAL_PROFILER.enabled = getattr(args, "profile_runtime", True)
+    events = EventWriter(event_log, source="orchestrator", profiler=GLOBAL_PROFILER)
+    event_reader = EventReader(event_log, profiler=GLOBAL_PROFILER)
+    dashboard_state = RolloutAggregator(
+        tasks,
+        episodes_per_task,
+        stall_warning_seconds=getattr(args, "stall_warning_seconds", 30.0),
+    )
+    dashboard = RolloutDashboard(
+        dashboard_state,
+        enabled={"auto": None, "on": True, "off": False}.get(
+            getattr(args, "dashboard", "auto"), None
+        ),
+        refresh_seconds=getattr(args, "dashboard_refresh", 1.0),
+        screen=False,
+    )
+    dashboard.start()
 
     print(
         f"Checking GR00T server {args.server_host}:{args.server_port} and checkpoint contract...",
@@ -235,8 +326,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         policy=getattr(args, "policy", "auto"),
         sensor_contract=getattr(args, "sensor_contract", None),
         scene_calibration=getattr(args, "scene_calibration", None),
+        profiler=GLOBAL_PROFILER,
+        log_level=getattr(args, "log_level", "normal"),
     ) as connected_policy:
         server_info = getattr(connected_policy, "model_info", None)
+        policy_type = getattr(connected_policy, "policy_type", "unknown")
+
+    start_event = events.emit(
+        "rollout_started",
+        event_id="rollout-started",
+        flush=True,
+        experiment_name=output_dir.name,
+        checkpoint=args.checkpoint,
+        checkpoint_identity=(server_info or {}).get("checkpoint_identity"),
+        policy_type=policy_type,
+        sidecar_type=(server_info or {}).get("sidecar_type"),
+        action_horizon=(server_info or {}).get("action_horizon"),
+        execution_horizon=args.execution_horizon,
+        tasks=tasks,
+        episodes_per_task=episodes_per_task,
+        total_episodes=len(tasks) * episodes_per_task,
+        phase="Preparing tasks",
+    )
+    dashboard.update([start_event], force=True)
 
     python_command = shlex.split(args.python_command)
     if not python_command:
@@ -245,10 +357,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     all_episodes: list[EpisodeResult] = []
     runtime_metadata: dict[str, Any] = {}
 
-    emit_event("start", total=len(tasks) * episodes_per_task)
-
     for task_index, task in enumerate(tasks):
-        emit_event("task", task=task, index=task_index + 1, task_count=len(tasks))
+        task_started = time.monotonic()
+        events.emit(
+            "task_started",
+            event_id=f"task-started:{task}",
+            task=task,
+            task_index=task_index,
+            total_tasks=len(tasks),
+            planned_episodes=episodes_per_task,
+            phase="Task initialization",
+        )
         result_json = result_dir / f"{task}.json"
         command = [
             *python_command,
@@ -283,6 +402,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             str(output_dir),
             "--result-json",
             str(result_json),
+            "--event-log",
+            str(event_log),
+            "--rollout-diagnostics",
+            getattr(args, "rollout_diagnostics", "standard"),
+            "--diagnostic-sample-every",
+            str(getattr(args, "diagnostic_sample_every", 10)),
+            "--episode-telemetry-interval",
+            str(getattr(args, "episode_telemetry_interval", 1.0)),
+            "--log-level",
+            getattr(args, "log_level", "normal"),
+            "--profile-runtime"
+            if getattr(args, "profile_runtime", True)
+            else "--no-profile-runtime",
+            "--gpu-sync-profile"
+            if getattr(args, "gpu_sync_profile", False)
+            else "--no-gpu-sync-profile",
             "--device",
             args.device,
         ]
@@ -312,7 +447,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             command,
             cwd=args.univtac_root.resolve(),
             log_path=output_dir / "logs" / f"{task}.log",
+            on_output=lambda: dashboard.update(event_reader.read()),
+            echo=not dashboard.interactive,
         )
+        dashboard.update(event_reader.read(), force=True)
         task_episodes: list[EpisodeResult] = []
         task_metadata: dict[str, Any] = {}
         completed = False
@@ -328,6 +466,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 result_error = f"Could not read worker result {result_json}: {exc}"
         else:
             result_error = f"Worker did not create its result file: {result_json}"
+
+        # Replay every atomic worker result into telemetry. Stable event IDs make
+        # this a no-op for normal runs and recover the narrow crash window after
+        # result persistence but before the worker's event append.
+        for row in task_episodes:
+            event_id = f"episode-completed:{row.task}:{row.episode_index}"
+            if event_id in dashboard_state.seen_event_ids:
+                continue
+            events.emit(
+                "episode_completed",
+                event_id=event_id,
+                task=row.task,
+                episode_index=row.episode_index,
+                seed=row.seed,
+                success=row.success,
+                status=classify_result(row.success, row.termination_reason),
+                termination_reason=row.termination_reason,
+                error_category=row.termination_reason if row.success is None else None,
+                num_steps=row.num_steps,
+                sim_steps=row.sim_steps,
+                elapsed_seconds=row.elapsed_seconds,
+                execution_horizon=row.execution_horizon,
+                recovered_from_worker_result=True,
+            )
+        dashboard.update(event_reader.read(), force=True)
 
         process_metadata = asdict(outcome)
         runtime_metadata[task] = {
@@ -385,7 +548,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         failure_detail = "\n".join(issues) or "worker did not produce a valid episode result"
         all_episodes.extend(task_episodes)
-        all_episodes.extend(
+        missing_results = [
             _worker_failure_result(
                 args,
                 task=task,
@@ -393,10 +556,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 error=failure_detail,
             )
             for episode_index in missing_indices
-        )
+        ]
+        all_episodes.extend(missing_results)
+        for row in missing_results:
+            events.emit(
+                "episode_completed",
+                event_id=f"episode-completed:{row.task}:{row.episode_index}",
+                task=row.task,
+                episode_index=row.episode_index,
+                seed=row.seed,
+                success=None,
+                status="error",
+                termination_reason="worker_failure",
+                error_category="worker_failure",
+                num_steps=0,
+                sim_steps=0,
+                elapsed_seconds=0.0,
+                execution_horizon=row.execution_horizon,
+                executed=False,
+            )
+        dashboard.update(event_reader.read(), force=True)
 
         run_incomplete = bool(issues)
-        write_results(
+        running_aggregate = write_results(
             output_dir,
             all_episodes,
             tasks,
@@ -413,11 +595,40 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             },
         )
         if run_incomplete:
+            failed_event = events.emit(
+                "task_failed",
+                event_id=f"task-failed:{task}",
+                flush=True,
+                task=task,
+                phase=phase,
+                error_category="worker_failure",
+                message=failure_detail,
+                unexecuted_episodes=len(missing_indices),
+                worker_return_code=outcome.return_code,
+                worker_log=str(output_dir / "logs" / f"{task}.log"),
+            )
+            dashboard.update([failed_event], force=True)
+            dashboard.close()
             raise RuntimeError(
                 f"UniVTAC worker for {task} did not complete a valid rollout: "
                 f"{failure_detail}. See {output_dir / 'logs' / f'{task}.log'} and "
                 f"{output_dir / 'summary.json'}"
             )
+        task_summary = next(row for row in running_aggregate["tasks"] if row["task"] == task)
+        task_event = events.emit(
+            "task_completed",
+            event_id=f"task-completed:{task}",
+            flush=True,
+            task=task,
+            completed_episodes=task_summary["total_rollouts"],
+            successes=task_summary["successes"],
+            failures=task_summary["failures"],
+            errors=task_summary["errors"],
+            success_rate=task_summary["success_rate"],
+            elapsed_seconds=time.monotonic() - task_started,
+            phase="Task completed",
+        )
+        dashboard.update([task_event], force=True)
 
     aggregate = write_results(
         output_dir,
@@ -438,6 +649,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "model_info": server_info,
         },
     )
+    completed_event = events.emit(
+        "rollout_completed",
+        event_id="rollout-completed",
+        flush=True,
+        completed_episodes=aggregate["total_rollouts"],
+        successes=aggregate["total_successes"],
+        failures=aggregate["total_failures"],
+        errors=aggregate["total_errors"],
+        macro_success_rate=aggregate["macro_average"],
+        micro_success_rate=aggregate["micro_average"],
+        phase="Completed",
+    )
+    dashboard.update([completed_event], force=True)
+    dashboard.close()
+    GLOBAL_PROFILER.write_json(
+        output_dir / "logs" / "latency_metrics.json",
+        metadata={
+            "worker_profiles": {
+                task: values.get("performance_profile", {})
+                for task, values in runtime_metadata.items()
+            },
+            "gpu_synchronized": bool(getattr(args, "gpu_sync_profile", False)),
+        },
+    )
+    events.close()
     print("\n" + (output_dir / "summary.txt").read_text(encoding="utf-8"))
     print(f"Results: {output_dir}")
     return aggregate

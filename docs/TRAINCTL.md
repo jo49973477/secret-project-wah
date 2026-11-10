@@ -6,6 +6,13 @@ only forwards numeric metrics and completed checkpoint paths over the public
 `from trainctl import tracker` SDK. Final success requires a zero process exit,
 including final saving, loss assertions, and dataset cleanup.
 
+Rollout supervision is a separate integration. It does not import Hugging Face
+callbacks or alter the training persona packs described below. The deployment
+controller launches `trainctl run → rollout SDK bridge → Isaac evaluator`; the
+bridge consumes `logs/rollout_events.jsonl` and uses only the public
+`tracker.init`, `define_metrics`, `log`, `notify`, `finish`, and `fail` APIs.
+trainctl remains the authority for the supervised process exit status.
+
 ## Install
 
 Python 3.12 is supported. WAH pins `trainctl[discord,nvml,telegram]==0.2.0` from
@@ -159,6 +166,67 @@ does not require trainctl to be installed.
 The persona is passed to the CLI **before** training, so the automatic start
 message uses the chosen mode. Messages come from trainctl's packaged definitions.
 Do not wrap `train_hydra.py` in another `trainctl run`; Hydra rejects nesting.
+
+## Rollout trainctl configuration
+
+Rollouts use CLI settings because the existing rollout launchers do not use
+Hydra. Keep transport credentials in the same private `TRAINCTL_*` environment
+variables documented above:
+
+```bash
+bash scripts/run_gr00t_univtac_local.sh \
+  --checkpoint "$CHECKPOINT" --policy wah \
+  --sensor-contract /path/to/training-dataset/meta/modality.json \
+  --model-python .venv/bin/python \
+  --mode smoke --episodes-per-task 1 --tasks lift_can \
+  --execution-horizon 1 --output-dir "$OUT" \
+  --dashboard auto --rollout-diagnostics standard \
+  --trainctl-enabled --trainctl-message-mode roboco \
+  --rollout-message-style 3 --notify-task-complete \
+  --notify-halfway --notify-errors
+```
+
+The control/model Python must contain trainctl; the Isaac/UniVTAC environment
+does not need it. `--trainctl-enabled` fails before evaluation if the control
+Python lacks a compatible tracker API. With trainctl disabled, the same command
+still has the local dashboard and produces identical evaluation outputs.
+
+Rollout metric names and definitions are:
+
+| Metric | Definition |
+|---|---|
+| `rollout/completed_episodes` | Episode completion events, including errors |
+| `rollout/total_episodes` | Selected tasks × planned episodes per task |
+| `rollout/successes` / `failures` / `errors` | Existing rollout classification |
+| `rollout/success_rate` | Successes ÷ (successes + failures); errors excluded |
+| `rollout/error_rate` | Errors ÷ completed episodes |
+| `rollout/episodes_per_second` | Completed episodes ÷ observed elapsed time |
+| `rollout/inference_latency_ms` | Mean sampled policy request latency |
+| `rollout/simulation_fps` | Mean measured simulation action rate |
+| `rollout/gpu_memory_used_mib` | Available control-side GPU sample |
+
+Unavailable and non-finite values are skipped. Metric updates never create chat
+notifications. Notifications are limited to rollout start, global 50%, each task
+completion, first/throttled error categories, critical infrastructure failure,
+and final completion or abort. Task notifications always include the real
+episode counts, S/F/E counts, rate, and elapsed time; final messages include both
+macro and micro rates when defined. Delivery errors are isolated from simulation.
+
+Rollout character modes are `koyori`, `roboco`, `neuro`, `sopia`, and `standard`.
+The `sopia` identifier is preserved; `sophia` is only a compatibility alias.
+`--rollout-message-style {1,2,3}` deterministically selects one of the three
+Rollout variants from the canonical Notion specification for the entire run.
+These messages are stored separately from trainctl's Training packs. Task
+completion and recoverable episode errors are deliberately factual rather than
+invented character dialogue. Dramatic Error dialogue is reserved for an aborted
+rollout, and optimistic completion dialogue is suppressed if error episodes make
+it contradict the result.
+
+Discord and Telegram setup is identical to training. Never place webhook URLs or
+tokens in checked-in YAML, shell history, or documentation. The complete rollout
+dashboard, diagnostic levels, artifact list, full eight-task example, and failure
+troubleshooting are in
+[`examples/UniVTAC/CLOSED_LOOP_ROLLOUT.md`](../examples/UniVTAC/CLOSED_LOOP_ROLLOUT.md).
 
 ## Commands
 

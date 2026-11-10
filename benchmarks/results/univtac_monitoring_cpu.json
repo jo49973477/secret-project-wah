@@ -1,0 +1,41 @@
+{
+  "scope": "CPU-only fake worker; not a GPU/Isaac speedup measurement",
+  "recorded_at": "2026-11-10",
+  "command": ".venv/bin/python benchmarks/univtac_monitoring_benchmark.py --actions 300 --action-seconds 0.01",
+  "action_seconds": 0.01,
+  "cases": [
+    {
+      "mode": "disabled",
+      "wall_seconds": 3.108537428,
+      "cpu_seconds": 0.288434297,
+      "events_processed": 0,
+      "event_to_display_mean_ms": null,
+      "event_to_display_p95_ms": null,
+      "log_bytes": 0,
+      "peak_python_memory_bytes": 320,
+      "wall_overhead_percent_vs_disabled": 0.0
+    },
+    {
+      "mode": "legacy",
+      "wall_seconds": 3.742236438,
+      "cpu_seconds": 0.153747943,
+      "events_processed": 1,
+      "event_to_display_mean_ms": 319.465685,
+      "event_to_display_p95_ms": 319.465685,
+      "log_bytes": 79045,
+      "peak_python_memory_bytes": 67619,
+      "wall_overhead_percent_vs_disabled": 20.385760978522782
+    },
+    {
+      "mode": "optimized",
+      "wall_seconds": 3.21166131,
+      "cpu_seconds": 0.103034513,
+      "events_processed": 5,
+      "event_to_display_mean_ms": 29.4300096,
+      "event_to_display_p95_ms": 50.629224,
+      "log_bytes": 1666,
+      "peak_python_memory_bytes": 4011858,
+      "wall_overhead_percent_vs_disabled": 3.3174405773955584
+    }
+  ]
+}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -22,8 +23,12 @@ sys.path.insert(0, str(ROOT / "examples" / "UniVTAC"))
 
 from univtac_rollout.checkpoint import checkpoint_identity  # noqa: E402
 from univtac_rollout.client import MinimalPolicyClient  # noqa: E402
+from univtac_rollout.dashboard import RolloutDashboard  # noqa: E402
+from univtac_rollout.diagnostics import dependency_preflight  # noqa: E402
+from univtac_rollout.monitoring import AsyncSampler  # noqa: E402
 from univtac_rollout.multimodal import load_sensor_contract, validate_contract  # noqa: E402
-from univtac_progress import RolloutProgress  # noqa: E402
+from univtac_rollout.profiling import GLOBAL_PROFILER  # noqa: E402
+from univtac_rollout.telemetry import LOG_LEVELS, EventReader, EventWriter, RolloutAggregator  # noqa: E402
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -50,6 +55,37 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--sensor-contract", type=Path)
     parser.add_argument("--scene-calibration", type=Path)
     parser.add_argument("--execution-horizon", type=int, default=1)
+    parser.add_argument("--dashboard", choices=("auto", "on", "off"), default="auto")
+    parser.add_argument("--dashboard-refresh", type=float, default=1.0)
+    parser.add_argument("--episode-telemetry-interval", type=float, default=1.0)
+    parser.add_argument("--gpu-telemetry-interval", type=float, default=5.0)
+    parser.add_argument("--gpu-sampling-timeout", type=float, default=2.0)
+    parser.add_argument("--stall-warning-seconds", type=float, default=30.0)
+    parser.add_argument("--log-level", choices=LOG_LEVELS, default="normal")
+    parser.add_argument("--profile-runtime", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gpu-sync-profile", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--rollout-diagnostics", choices=("off", "standard", "full"), default="standard"
+    )
+    parser.add_argument("--diagnostic-sample-every", type=int, default=10)
+    parser.add_argument("--trainctl-enabled", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--trainctl-message-mode",
+        choices=("standard", "koyori", "roboco", "neuro", "sopia", "sophia"),
+        default="standard",
+    )
+    parser.add_argument("--rollout-message-style", type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument(
+        "--notify-task-complete", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument("--notify-halfway", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--notify-errors", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--validate-ffmpeg",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_known_args()
 
 
@@ -77,6 +113,21 @@ def validate_python(
     )
     if result.returncode:
         raise RuntimeError(f"{role} Python {python} failed validation: {result.stderr.strip()}")
+
+
+def validate_simulator_ffmpeg(launcher: str) -> None:
+    command = shlex.split(launcher)
+    script = (
+        "import shutil,sys; executable=shutil.which('ffmpeg'); "
+        "sys.exit(0 if executable else 'FFmpeg executable unavailable in simulator environment')"
+    )
+    result = subprocess.run([*command, "-c", script], cwd=ROOT, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "FFmpeg executable unavailable in simulator environment"
+        )
 
 
 def probe(
@@ -143,7 +194,7 @@ def wait_ready(args: argparse.Namespace, server: subprocess.Popen | None) -> dic
     )
 
 
-def gpu_memory() -> list[dict]:
+def gpu_memory(timeout_seconds: float = 2.0) -> list[dict]:
     try:
         result = subprocess.run(
             [
@@ -154,7 +205,7 @@ def gpu_memory() -> list[dict]:
             capture_output=True,
             text=True,
             check=True,
-            timeout=5,
+            timeout=timeout_seconds,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return []
@@ -191,6 +242,45 @@ def stop_owned(process: subprocess.Popen | None) -> None:
 def git_commit() -> str | None:
     result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def failure_category(text: str) -> str:
+    lowered = text.lower()
+    patterns = (
+        ("no space left on device", "no_space_left"),
+        ("ffmpeg", "ffmpeg_unavailable_or_failed"),
+        ("out of memory", "cuda_oom"),
+        ("nan", "nonfinite_action"),
+        ("checkpoint identity mismatch", "checkpoint_identity_mismatch"),
+        ("readiness timed out", "server_startup_timeout"),
+        ("sensor contract", "sensor_contract_mismatch"),
+        ("invalid_action", "invalid_action"),
+    )
+    return next(
+        (category for pattern, category in patterns if pattern in lowered), "process_failure"
+    )
+
+
+def last_relevant_error(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    relevant = [
+        line.strip()
+        for line in lines
+        if any(
+            token in line.lower()
+            for token in ("error", "exception", "traceback", "failed", "out of memory", "no space")
+        )
+    ]
+    if not relevant:
+        return None
+    # Keep credentials and URLs out of structured telemetry/notifications.
+    value = relevant[-1]
+    for secret in ("webhook", "token", "authorization"):
+        if secret in value.lower():
+            return "[redacted credential-bearing error; inspect local log]"
+    return value[:500]
 
 
 def print_rollout_summary(output: Path, logs: Path) -> dict | None:
@@ -241,6 +331,25 @@ def build_rollout_command(
         args.sim_device,
         "--output-dir",
         str(output),
+        "--event-log",
+        str(output / "logs" / "rollout_events.jsonl"),
+        "--rollout-diagnostics",
+        getattr(args, "rollout_diagnostics", "standard"),
+        "--diagnostic-sample-every",
+        str(getattr(args, "diagnostic_sample_every", 10)),
+        "--episode-telemetry-interval",
+        str(getattr(args, "episode_telemetry_interval", 1.0)),
+        "--stall-warning-seconds",
+        str(getattr(args, "stall_warning_seconds", 30.0)),
+        "--log-level",
+        getattr(args, "log_level", "normal"),
+        "--profile-runtime" if getattr(args, "profile_runtime", True) else "--no-profile-runtime",
+        "--gpu-sync-profile"
+        if getattr(args, "gpu_sync_profile", False)
+        else "--no-gpu-sync-profile",
+        # The deployment controller owns the user's terminal and renders events.
+        "--dashboard",
+        "off",
     ]
     if getattr(args, "checkpoint_identity", None) is not None:
         cmd += ["--checkpoint-identity", args.checkpoint_identity]
@@ -251,9 +360,120 @@ def build_rollout_command(
     return cmd + passthrough
 
 
+def _planned_episodes(passthrough: list[str]) -> int:
+    modes = {"smoke": 5, "quick": 20, "full": 100}
+    episodes = None
+    mode = "smoke"
+    tasks = 8
+    for index, value in enumerate(passthrough):
+        if value == "--episodes-per-task" and index + 1 < len(passthrough):
+            episodes = int(passthrough[index + 1])
+        elif value == "--mode" and index + 1 < len(passthrough):
+            mode = passthrough[index + 1]
+        elif value == "--tasks":
+            selected = []
+            for item in passthrough[index + 1 :]:
+                if item.startswith("--"):
+                    break
+                selected.append(item)
+            tasks = 8 if selected == ["all"] or not selected else len(selected)
+    return max(1, (episodes or modes.get(mode, 5)) * tasks)
+
+
+def trainctl_rollout_command(
+    args: argparse.Namespace, output: Path, command: list[str], passthrough: list[str]
+) -> list[str]:
+    control_python = args.model_python
+    check = subprocess.run(
+        [
+            str(control_python),
+            "-c",
+            "from trainctl import tracker; "
+            "assert all(hasattr(tracker,n) for n in "
+            "('init','define_metrics','log','notify','finish','fail'))",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode != 0:
+        raise RuntimeError(
+            "trainctl was explicitly requested but is unavailable in the control Python. "
+            f"Install WAH's locked dependencies into {control_python} with 'uv sync --locked'."
+        )
+    event_log = output / "logs" / "rollout_events.jsonl"
+    name = f"rollout-{Path(args.checkpoint).name}-{output.name}"
+    bridge = [
+        str(control_python),
+        str(ROOT / "scripts" / "univtac_rollout_trainctl_bridge.py"),
+        "--event-log",
+        str(event_log),
+        "--name",
+        name,
+        "--message-mode",
+        args.trainctl_message_mode,
+        "--message-style",
+        str(args.rollout_message_style),
+        "--notify-task-complete" if args.notify_task_complete else "--no-notify-task-complete",
+        "--notify-halfway" if args.notify_halfway else "--no-notify-halfway",
+        "--notify-errors" if args.notify_errors else "--no-notify-errors",
+        "--",
+        *command,
+    ]
+    return [
+        str(control_python),
+        "-m",
+        "gr00t.experiment.trainctl_cli",
+        "run",
+        "--name",
+        name,
+        "--checkpoint-dir",
+        str(output),
+        "--total-steps",
+        str(_planned_episodes(passthrough)),
+        # The SDK bridge supplies rollout-specific persona text. Keep the supervisor
+        # itself factual so training dialogue is never attached to a rollout.
+        "--message-mode",
+        "standard",
+        "--",
+        *bridge,
+    ]
+
+
 def run(args: argparse.Namespace, passthrough: list[str]) -> int:
+    defaults = {
+        "dashboard": "auto",
+        "dashboard_refresh": 1.0,
+        "episode_telemetry_interval": 1.0,
+        "gpu_telemetry_interval": 5.0,
+        "gpu_sampling_timeout": 2.0,
+        "stall_warning_seconds": 30.0,
+        "log_level": "normal",
+        "profile_runtime": True,
+        "gpu_sync_profile": False,
+        "rollout_diagnostics": "standard",
+        "diagnostic_sample_every": 10,
+        "trainctl_enabled": False,
+        "trainctl_message_mode": "standard",
+        "rollout_message_style": 1,
+    }
+    for name, default in defaults.items():
+        if not hasattr(args, name):
+            setattr(args, name, default)
     if args.startup_timeout <= 0 or args.retry_interval <= 0:
         raise ValueError("Startup timeout and retry interval must be positive.")
+    for option in (
+        "dashboard_refresh",
+        "episode_telemetry_interval",
+        "gpu_telemetry_interval",
+        "gpu_sampling_timeout",
+        "stall_warning_seconds",
+    ):
+        value = getattr(args, option)
+        if value <= 0 or not math.isfinite(value):
+            raise ValueError(f"--{option.replace('_', '-')} must be finite and positive.")
+    if args.diagnostic_sample_every < 1:
+        raise ValueError("--diagnostic-sample-every must be positive.")
     args.checkpoint = str(Path(args.checkpoint).expanduser().resolve())
     args.model_python = args.model_python.expanduser().absolute()
     if args.deployment == "local" or getattr(args, "checkpoint_identity", None) is None:
@@ -277,6 +497,8 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
         "Isaac",
         os.environ.get("UNIVTAC_PYTHON_COMMAND"),
     )
+    if getattr(args, "validate_ffmpeg", False):
+        validate_simulator_ffmpeg(os.environ.get("UNIVTAC_PYTHON_COMMAND", str(Path(sim_python))))
     if not os.environ.get("UNIVTAC_ROOT"):
         raise ValueError("UNIVTAC_ROOT must point to the UniVTAC checkout.")
     univtac_root = Path(os.environ["UNIVTAC_ROOT"]).expanduser().resolve()
@@ -295,6 +517,38 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
     output.mkdir(parents=True, exist_ok=True)
     logs = output / "logs"
     logs.mkdir(exist_ok=True)
+    preflight = dependency_preflight(
+        output_dir=output,
+        checkpoint=args.checkpoint,
+        server_host=args.server_host,
+        server_port=args.server_port,
+        # Local mode already ran check_port above; do not probe the same socket
+        # twice (and keep this diagnostics helper independently testable).
+        require_server_port=False,
+        sensor_contract=args.sensor_contract,
+        require_ffmpeg=False,
+    )
+    event_path = logs / "rollout_events.jsonl"
+    GLOBAL_PROFILER.enabled = args.profile_runtime
+    event_writer = EventWriter(event_path, source="deployment", profiler=GLOBAL_PROFILER)
+    event_reader = EventReader(event_path, profiler=GLOBAL_PROFILER)
+    rollout_state = RolloutAggregator(stall_warning_seconds=args.stall_warning_seconds)
+    dashboard = RolloutDashboard(
+        rollout_state,
+        enabled={"auto": None, "on": True, "off": False}[args.dashboard],
+        refresh_seconds=args.dashboard_refresh,
+    )
+    dashboard.start()
+    preflight_event = event_writer.emit(
+        "system_diagnostics",
+        event_id="system-diagnostics:preflight",
+        diagnostics={
+            **preflight,
+            "server_status": "not started" if args.deployment == "local" else "external",
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "all"),
+        },
+    )
+    dashboard.update([preflight_event], force=True)
     memory: dict[str, object] = {
         "before_launch": gpu_memory(),
         "after_model_load": [],
@@ -338,7 +592,16 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
     rollout_log = None
     monitor_stop = threading.Event()
     monitor_thread: threading.Thread | None = None
+    gpu_sampler: AsyncSampler | None = None
     try:
+        server_starting = event_writer.emit(
+            "server_starting",
+            event_id="server-starting",
+            server_status="starting" if args.deployment == "local" else "probing external",
+            server_log=str(logs / "server.log") if args.deployment == "local" else None,
+            phase="Server starting",
+        )
+        dashboard.update([server_starting], force=True)
         if args.deployment == "local":
             server_log = (logs / "server.log").open("w", encoding="utf-8")
             model_env = os.environ.copy()
@@ -365,6 +628,14 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
                 stdout=server_log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+            )
+            event_writer.emit(
+                "system_diagnostics",
+                event_id="system-diagnostics:server-process",
+                diagnostics={
+                    "server_pid": getattr(server, "pid", None),
+                    "server_status": "starting",
+                },
             )
         try:
             info = wait_ready(args, server)
@@ -393,8 +664,22 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
             f"Server ready: {info['checkpoint_identity']} {info['policy_type']} {info.get('sidecar_type')}",
             flush=True,
         )
-        print(f"Starting UniVTAC rollout (live progress; detailed logs: {logs})", flush=True)
+        ready_event = event_writer.emit(
+            "server_ready",
+            event_id="server-ready",
+            flush=True,
+            server_status="ready",
+            server_pid=getattr(server, "pid", None),
+            server_initialization_seconds=time.monotonic() - start,
+            checkpoint_identity=info.get("checkpoint_identity"),
+            policy_type=info.get("policy_type"),
+            sidecar_type=info.get("sidecar_type"),
+            phase="Server ready",
+        )
+        dashboard.update([ready_event], force=True)
         cmd = build_rollout_command(args, output, passthrough)
+        if args.trainctl_enabled:
+            cmd = trainctl_rollout_command(args, output, cmd, passthrough)
         sim_env = os.environ.copy()
         if args.sim_visible_devices is not None:
             sim_env["CUDA_VISIBLE_DEVICES"] = args.sim_visible_devices
@@ -411,35 +696,28 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
 
         log_offsets: dict[Path, int] = {}
         log_tails: dict[Path, str] = {}
-        progress = RolloutProgress()
+
+        def sample_gpu() -> list[dict] | None:
+            rows = gpu_memory(args.gpu_sampling_timeout)
+            return rows or None
+
+        gpu_sampler = AsyncSampler(
+            sample_gpu,
+            interval_seconds=args.gpu_telemetry_interval,
+            stage="monitoring.gpu_telemetry_collection",
+            profiler=GLOBAL_PROFILER,
+        )
+        gpu_sampler.start()
 
         def monitor() -> None:
-            rollout_offset = 0
-            pending_line = ""
-            last_gpu_sample = 0.0
-
-            def drain_rollout_log() -> None:
-                nonlocal rollout_offset, pending_line
-                with rollout_log_path.open(encoding="utf-8", errors="replace") as stream:
-                    stream.seek(rollout_offset)
-                    pending_line += stream.read()
-                    rollout_offset = stream.tell()
-                while "\n" in pending_line:
-                    line, pending_line = pending_line.split("\n", 1)
-                    progress.consume(line)
-
-            while True:
-                drain_rollout_log()
-                progress.render()
-
-                now = time.monotonic()
-                if now - last_gpu_sample >= 2:
-                    last_gpu_sample = now
-                    for row in gpu_memory():
-                        key = str(row["index"])
-                        memory["peak_used_mib"][key] = max(
-                            memory["peak_used_mib"].get(key, 0), row["used_mib"]
-                        )
+            while not monitor_stop.wait(1.0):
+                rows, gpu_error, gpu_sample_time = gpu_sampler.snapshot()
+                rows = rows or []
+                for row in rows:
+                    key = str(row["index"])
+                    memory["peak_used_mib"][key] = max(
+                        memory["peak_used_mib"].get(key, 0), row["used_mib"]
+                    )
                 if not memory["after_sim_init"]:
                     for task_log in logs.glob("*.log"):
                         if task_log.name in {"server.log", "rollout.log"}:
@@ -452,19 +730,37 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
                             log_offsets[task_log] = stream.tell()
                             log_tails[task_log] = tail[-100:]
                         if "phase=task_construction: complete" in tail:
-                            memory["after_sim_init"] = gpu_memory()
+                            memory["after_sim_init"] = list(rows)
                             break
-                if monitor_stop.wait(0.5):
-                    # The child may have flushed its final event after our
-                    # previous read; drain again before printing the summary.
-                    drain_rollout_log()
-                    if pending_line:
-                        progress.consume(pending_line)
-                    return
+                selected = rows[0] if rows else {}
+                event_writer.emit(
+                    "system_diagnostics",
+                    diagnostics={
+                        "server_status": "ready"
+                        if server is None or server.poll() is None
+                        else "exited",
+                        "server_pid": getattr(server, "pid", None),
+                        "server_exit_code": server.poll() if server is not None else None,
+                        "simulator_pid": getattr(rollout, "pid", None),
+                        "simulator_status": "running"
+                        if rollout is not None and rollout.poll() is None
+                        else "exited",
+                        "gpu_memory_used_mib": selected.get("used_mib"),
+                        "gpu_memory_free_mib": selected.get("free_mib"),
+                        "gpu_memory_total_mib": selected.get("total_mib"),
+                        "gpu_memory_peak_mib": max(memory["peak_used_mib"].values(), default=0),
+                        "gpu_index": selected.get("index"),
+                        "gpu_model": selected.get("model"),
+                        "gpu_telemetry_error": gpu_error,
+                        "gpu_sample_monotonic": gpu_sample_time,
+                        "cuda_visible_devices": sim_visibility or "all",
+                    },
+                )
 
         monitor_thread = threading.Thread(target=monitor, daemon=True)
         monitor_thread.start()
         while rollout.poll() is None:
+            dashboard.update(event_reader.read())
             if server is not None and server.poll() is not None:
                 print(
                     f"Inference server crashed during rollout (code {server.returncode}); "
@@ -473,18 +769,62 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
                 )
                 stop_owned(rollout)
                 break
-            time.sleep(1)
+            time.sleep(min(args.dashboard_refresh, 0.2))
         code = rollout.wait()
+        dashboard.update(event_reader.read(), force=True)
         if server is not None and server.returncode is not None and code == 0:
             code = 1
         monitor_stop.set()
         monitor_thread.join(timeout=3)
+        gpu_sampler.close(timeout=args.gpu_sampling_timeout + 0.5)
         rollout_log.flush()
-        progress.finish()
         summary = print_rollout_summary(output, logs)
         if summary is not None and summary["total_errors"] > 0 and code == 0:
             code = 1
+        completed_with_errors = bool(
+            summary is not None
+            and summary["total_errors"] > 0
+            and rollout_state.status == "Completed"
+        )
         if code:
+            if completed_with_errors:
+                warning = event_writer.emit(
+                    "system_warning",
+                    event_id="system-warning:completed-with-errors",
+                    flush=True,
+                    message=(
+                        "All scheduled episodes completed, but evaluation/infrastructure errors "
+                        "require a nonzero exit. See summary.json and worker logs."
+                    ),
+                    error_category="completed_with_errors",
+                )
+                dashboard.update([warning], force=True)
+                dashboard.close()
+                print(
+                    f"Rollout completed with {summary['total_errors']} error episode(s); "
+                    f"returning code {code}. Logs preserved in {logs}",
+                    file=sys.stderr,
+                )
+                return 130 if interrupted else code
+            server_error = last_relevant_error(logs / "server.log")
+            rollout_error = last_relevant_error(logs / "rollout.log")
+            failure_event = event_writer.emit(
+                "rollout_failed",
+                event_id="rollout-failed",
+                flush=True,
+                error_category="inference_server_crash"
+                if server is not None and server.returncode is not None
+                else failure_category(rollout_error or "process failure"),
+                message=f"Rollout process exited with code {code}",
+                exit_code=code,
+                server_exit_code=server.returncode if server is not None else None,
+                server_log=str(logs / "server.log") if server_log is not None else None,
+                rollout_log=str(logs / "rollout.log"),
+                last_relevant_error=server_error or rollout_error,
+                phase=rollout_state.phase,
+            )
+            dashboard.update([failure_event], force=True)
+            dashboard.close()
             print((logs / "rollout.log").read_text(encoding="utf-8")[-5000:], file=sys.stderr)
             if "out of memory" in (logs / "rollout.log").read_text(encoding="utf-8").lower():
                 print("CUDA OOM in rollout/Isaac process.", file=sys.stderr)
@@ -498,18 +838,41 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
                 file=sys.stderr,
             )
         return 130 if interrupted else code
+    except BaseException as exc:
+        if rollout_state.status not in {"Failed", "Completed"}:
+            category = (
+                "no_space_left"
+                if isinstance(exc, OSError) and exc.errno == 28
+                else failure_category(str(exc))
+            )
+            failure_event = event_writer.emit(
+                "rollout_failed",
+                event_id="rollout-failed",
+                flush=True,
+                error_category=category,
+                message=str(exc)[:1000],
+                server_exit_code=server.poll() if server is not None else None,
+                server_log=str(logs / "server.log") if server_log is not None else None,
+                rollout_log=str(logs / "rollout.log") if rollout_log is not None else None,
+                phase=rollout_state.phase,
+            )
+            dashboard.update([failure_event], force=True)
+            dashboard.close()
+        raise
     finally:
         monitor_stop.set()
         if monitor_thread is not None:
             monitor_thread.join(timeout=3)
-        if "progress" in locals():
-            progress.finish()
+        if gpu_sampler is not None:
+            gpu_sampler.close(timeout=args.gpu_sampling_timeout + 0.5)
         stop_owned(rollout)
         stop_owned(server)
         if server_log is not None:
             server_log.close()
         if rollout_log is not None:
             rollout_log.close()
+        dashboard.update(event_reader.read(), force=True)
+        dashboard.close()
         metadata = {
             "deployment_mode": args.deployment,
             "checkpoint_identity": locals().get("info", {}).get("checkpoint_identity"),
@@ -526,6 +889,12 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
             "git_commit": git_commit(),
             "duration_seconds": time.monotonic() - start,
             "gpu_memory": memory,
+            "rollout_events": str(event_path),
+            "rollout_diagnostics": args.rollout_diagnostics,
+            "dashboard": args.dashboard,
+            "trainctl_enabled": args.trainctl_enabled,
+            "trainctl_message_mode": args.trainctl_message_mode if args.trainctl_enabled else None,
+            "rollout_message_style": args.rollout_message_style if args.trainctl_enabled else None,
             "utc_finished": datetime.now(timezone.utc).isoformat(),
         }
         summary_path = output / "summary.json"
@@ -540,6 +909,15 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
         (output / "runtime_metadata.json").write_text(
             json.dumps(metadata, indent=2), encoding="utf-8"
         )
+        if args.profile_runtime:
+            GLOBAL_PROFILER.write_json(
+                logs / "monitor_latency_metrics.json",
+                metadata={
+                    "gpu_telemetry_interval_seconds": args.gpu_telemetry_interval,
+                    "dashboard_refresh_seconds": args.dashboard_refresh,
+                },
+            )
+        event_writer.close()
         signal.signal(signal.SIGINT, previous_int)
         signal.signal(signal.SIGTERM, previous_term)
 

@@ -22,6 +22,189 @@ needs the repository's separate `.venv/bin/python` with GR00T installed, or
 for the two processes. The supported UniVTAC branches and Isaac versions are
 in the table below; Isaac Sim 6.0.1 is not supported by this checkout.
 
+## Live rollout dashboard
+
+The local and split deployment launchers now keep the terminal in the control
+process and render rollout telemetry there. The Isaac evaluator and per-task
+workers still write ordinary UTF-8 logs, so no Rich control sequences enter
+persistent files. `--dashboard auto` (the default) uses Rich only for a TTY and
+emits concise text updates when redirected. `on` requests Rich when a TTY is
+available; `off` disables display output. SSH and tmux resizing is handled by
+Rich, and the display is closed during normal shutdown, exceptions, Ctrl+C, and
+SIGTERM.
+
+```bash
+bash scripts/run_gr00t_univtac_local.sh \
+  --checkpoint "$CHECKPOINT" --policy auto \
+  --model-python .venv/bin/python --model-device cuda:0 --sim-device cuda:0 \
+  --mode smoke --episodes-per-task 1 --tasks lift_can \
+  --execution-horizon 1 --dashboard auto --dashboard-refresh 1.0 \
+  --episode-telemetry-interval 1.0 --gpu-telemetry-interval 5.0 \
+  --log-level normal --rollout-diagnostics standard --output-dir "$OUT"
+```
+
+The dashboard has three independent counters: overall completed/planned
+episodes, completed/planned episodes for the active task, and executed
+actions/the episode step limit. Only `episode_completed` advances the first two
+counters. Rate-limited episode and inference events update the active phase and
+action counter. Routine worker telemetry defaults to one event per second;
+completion and critical failure events are immediate. The dashboard continues
+refreshing elapsed time when no new event arrives, so a long GR00T request stays
+visibly in `GR00T inference` without falsely advancing an action.
+
+GPU sampling is independent of event consumption. `--gpu-telemetry-interval
+5.0` is the default, and `--gpu-sampling-timeout 2.0` bounds each `nvidia-smi`
+call. Samples never overlap; a failure keeps the last valid sample, or displays
+`N/A` if none has succeeded.
+
+ETA excludes setup and uses a bounded history of episode durations. It prefers
+task-specific history after two samples and otherwise uses global history after
+three. Until then it displays `Estimating...`; it is an estimate, not a
+deadline.
+
+Success means the task completed. Failure means a valid evaluation ended in
+`step_limit` or `early_stop`. Error means evaluation/infrastructure trouble such
+as `invalid_action`, `exception`, or `worker_failure`. The reported rate is:
+
+```text
+success_rate = successes / (successes + failures)
+```
+
+Errors are excluded; zero evaluated episodes display `N/A`. Micro success rate
+uses all valid episodes. Macro success rate averages per-task rates and remains
+`N/A` if a selected task has no valid evaluation. Error rate is errors divided
+by total completed episodes. An initialization failure also records how many
+episodes were never executed instead of presenting them as robot failures.
+
+### Diagnostic levels and telemetry artifacts
+
+Ordinary worker logging and structured diagnostics are separate:
+
+- `--log-level quiet`: essential lifecycle failures only.
+- `--log-level normal` (default): task/episode lifecycle and warnings.
+- `--log-level debug`: detailed per-action phase, action, and observation
+  messages. Debug output is buffered rather than flushed line by line.
+
+Structured progress is available at every log level.
+
+- `--rollout-diagnostics off`: lifecycle/progress only.
+- `standard` (default): low-overhead action ranges, corrections, limit/saturation,
+  smoothness/tracking summaries, input availability, temporal window state,
+  action horizon, inference latency, and FPS.
+- `full`: additionally samples observation shapes/non-finite ratios and the raw,
+  corrected, executed, and post-action observed qpos values. Use
+  `--diagnostic-sample-every N` (default 10) to control detailed sampling.
+
+These diagnostics do not compare commanded qpos with “ground truth”; the
+post-action difference is labeled joint tracking error. They reuse arrays already
+on CPU and do not add per-action CUDA synchronization. Small DOF 7 corrections
+remain corrections, not episode errors.
+
+Additional artifacts are written under `logs/`:
+
+- `rollout_events.jsonl`: newline-terminated, idempotent structured events;
+  readers ignore a killed writer's partial final record.
+- `worker_results/<task>.json`: the existing atomic partial result and crash
+  recovery source.
+- `<task>.log`, `rollout.log`, and `server.log`: full worker/control diagnostics.
+- `latency_metrics.json`: evaluator and worker stage timings.
+- `monitor_latency_metrics.json`: controller event, parsing, rendering, and GPU
+  collection timings.
+
+Each timing stage reports count, mean, p50, p95, maximum, and total
+milliseconds. Profiling uses `time.perf_counter_ns()` and does not synchronize
+CUDA. Disable it with `--no-profile-runtime`. Add `--gpu-sync-profile` only for
+an explicitly diagnostic run that needs GPU-complete inference timings; it
+calls `torch.cuda.synchronize()` and adds overhead.
+
+If no action completes for 30 seconds, the dashboard shows a nonfatal warning
+with phase, last action, and server status. Configure it with
+`--stall-warning-seconds`. This does not cancel a legitimate long request or
+change `--request-timeout-seconds`. `Episode reset` identifies environment
+initialization, `GR00T inference` a pending model request, and `Executing action`
+simulation/observation work.
+
+Disable rendering with `--dashboard off`; JSONL telemetry and trainctl lifecycle
+events continue. For detailed diagnosis:
+
+```bash
+bash scripts/run_gr00t_univtac_local.sh \
+  --checkpoint "$CHECKPOINT" --model-python .venv/bin/python \
+  --mode smoke --episodes-per-task 1 --tasks lift_can \
+  --dashboard auto --log-level debug --rollout-diagnostics full \
+  --diagnostic-sample-every 1 --gpu-sync-profile --output-dir "$OUT"
+```
+
+The CPU-only fake-worker benchmark does not claim GPU or Isaac speedups:
+
+```bash
+.venv/bin/python benchmarks/univtac_monitoring_benchmark.py \
+  --actions 300 --action-seconds 0.01 \
+  --output /tmp/univtac-monitoring-benchmark.json
+```
+
+The evaluator continues to create `episodes.csv`, `summary.csv`, `summary.json`,
+`summary.txt`, `summary.md`, `runtime_metadata.json`, and episode videos. It still
+refuses an output directory containing prior evaluation results.
+
+### trainctl rollout supervision and notifications
+
+Add `--trainctl-enabled` to the local or split launcher. The deployment controller
+runs a lightweight bridge with `--model-python` (normally `.venv/bin/python`),
+where the pinned trainctl package is installed; trainctl is not required inside
+Isaac Python. trainctl supervises the evaluator/bridge process, while the outer
+controller continues to own the terminal dashboard. SDK finish/fail annotations
+never replace the evaluator's real exit code.
+
+```bash
+export TRAINCTL_DISCORD_WEBHOOK_URL='<set-in-your-secret-manager>'
+# Telegram can be used instead or alongside Discord:
+export TRAINCTL_TELEGRAM_TOKEN='<bot-token>'
+export TRAINCTL_TELEGRAM_ALLOWED_USERS='<numeric-user-id>'
+
+bash scripts/run_gr00t_univtac_local.sh \
+  --checkpoint "$CHECKPOINT" --policy wah \
+  --sensor-contract /path/to/dataset/meta/modality.json \
+  --model-python .venv/bin/python --mode smoke --episodes-per-task 1 \
+  --tasks lift_can --execution-horizon 1 --output-dir "$OUT" \
+  --trainctl-enabled --trainctl-message-mode koyori \
+  --rollout-message-style 1 --notify-task-complete
+```
+
+Modes are `standard`, `koyori`, `roboco`, `neuro`, and the backward-compatible
+identifier `sopia` (`sophia` is accepted as an alias). Styles 1, 2, and 3 are the
+deterministic Rollout variants from the TrainCTL message specification. Training
+persona definitions are unchanged. Character dialogue is used for start,
+halfway, successful completion, and critical abort. Task completion and nonfatal
+episode errors use factual templates. If the rollout completes with error
+episodes, the final message omits optimistic character completion dialogue.
+
+Notifications are deduplicated: one start, one global halfway message, one per
+task completion, the first occurrence of each nonfatal error category, throttled
+aggregates for repeats, and one final completion/abort. Transport failures are
+safe warnings and cannot stop simulation. An explicitly requested but missing
+trainctl installation fails early with an actionable `uv sync --locked` message.
+
+For the full canonical evaluation:
+
+```bash
+bash scripts/run_gr00t_univtac_local.sh \
+  --checkpoint "$CHECKPOINT" --policy wah \
+  --sensor-contract /path/to/dataset/meta/modality.json \
+  --model-python .venv/bin/python --model-device cuda:0 --sim-device cuda:0 \
+  --mode full --tasks all --execution-horizon 1 \
+  --dashboard auto --rollout-diagnostics standard \
+  --trainctl-enabled --trainctl-message-mode sopia --rollout-message-style 2 \
+  --output-dir "$OUT"
+```
+
+Common preflight failures are explicit: missing simulator FFmpeg, missing/empty
+checkpoint weights, missing sensor contract, occupied local server port, wrong
+Python/runtime packages, unwritable output, and insufficient temporary filesystem
+space. For `[Errno 28]`, inspect all four filesystem rows rather than only the
+output mount. A server crash reports its PID/exit code, current phase, server log,
+and causes a nonzero supervised exit while preserving partial results.
+
 ### Split mode: externally managed remote server
 
 On the GPU server:
@@ -89,22 +272,11 @@ rollout. These observations are warnings, not a guarantee that a 24 GB card
 can fit both processes. CUDA OOM and process crashes preserve logs and exit
 nonzero. `--startup-timeout` and `--retry-interval` control readiness waiting.
 
-Both local and split launchers show live rollout progress in the terminal:
-
-```text
-Task 1/4: lift_can
-WAH [━━╺╺╺╺╺╺╺╺╺╺╺╺╺╺] 50/400 12.5% | ✓43 ✗6 !1 | lift_can | 860s ETA 6020s
-```
-
-The bar advances on **completed episodes** (not inference steps), with an
-overall total across all selected tasks. `✓` means simulation success, `✗`
-means a valid rollout that did not succeed, and `!` means an invalid action or
-evaluation error; ETA is estimated from elapsed time. An interactive terminal
-updates one line in place, while redirected output/SSH jobs without a TTY print
-a plain progress line per episode. Server initialization also prints a heartbeat
-every 10 seconds. Full Isaac diagnostics remain in `logs/rollout.log` and
-per-task `logs/<task>.log`; model-server diagnostics remain in `logs/server.log`.
-The final `summary.json` stays authoritative.
+Both launchers use the hierarchical dashboard described above. Interactive
+terminals update in place; redirected and non-TTY SSH jobs emit plain lines with
+overall, task, action, phase, elapsed, and ETA fields and no ANSI escapes. Full
+Isaac diagnostics remain in `logs/rollout.log` and per-task logs; server
+diagnostics remain in `logs/server.log`. `summary.json` stays authoritative.
 
 ### WAH Temporal and MoE smoke rollouts
 
@@ -263,7 +435,10 @@ A valid one-step smoke run logs all of the following:
 
 ## Failure semantics
 
-Worker output is unbuffered and each lifecycle phase is flushed to `logs/<task>.log`. The log footer records the worker PID, return code, signal (when the OS exposes one), and elapsed time.
+Structured telemetry is written independently and becomes visible immediately.
+Ordinary debug output is buffered to avoid per-action flush overhead; warnings
+and errors still flush promptly. The log footer records the worker PID, return
+code, signal (when exposed), and elapsed time.
 
 `logs/worker_results/<task>.json` records `phase`, `completed`, `fatal_error`, episode rows, and runtime metadata. The orchestrator requires the worker to explicitly report completion and return exactly the requested episode indices. A crash, missing result file, malformed result, nonzero exit, or zero-episode return creates explicit `worker_failure` rows and an `incomplete` summary before the command exits nonzero. Such rows never claim a video or successful evaluation.
 

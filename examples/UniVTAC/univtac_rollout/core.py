@@ -312,8 +312,11 @@ def aggregate_results(
                 "errors": len(errors),
                 "evaluated_episodes": evaluated,
                 "total_rollouts": len(task_rows),
+                "total_completed_episodes": len(task_rows),
                 "success_rate": len(successes) / evaluated if evaluated else None,
                 "success_rate_percent": 100.0 * len(successes) / evaluated if evaluated else None,
+                "error_rate": len(errors) / len(task_rows) if task_rows else None,
+                "error_rate_percent": 100.0 * len(errors) / len(task_rows) if task_rows else None,
                 "mean_episode_steps": _safe_mean(row.num_steps for row in successes + failures),
                 "mean_successful_episode_steps": _safe_mean(row.num_steps for row in successes),
                 "mean_failed_episode_steps": _safe_mean(row.num_steps for row in failures),
@@ -337,6 +340,13 @@ def aggregate_results(
         "total_errors": sum(row["errors"] for row in summaries),
         "total_evaluated_episodes": total_evaluated,
         "total_rollouts": len(episodes),
+        "total_completed_episodes": len(episodes),
+        "error_rate": sum(row["errors"] for row in summaries) / len(episodes)
+        if episodes
+        else None,
+        "error_rate_percent": 100.0 * sum(row["errors"] for row in summaries) / len(episodes)
+        if episodes
+        else None,
         "episode_counts_differ": len({row["evaluated_episodes"] for row in summaries}) > 1,
     }
 
@@ -433,8 +443,11 @@ def write_results(
             "errors": aggregate["total_errors"],
             "evaluated_episodes": aggregate["total_evaluated_episodes"],
             "total_rollouts": aggregate["total_rollouts"],
+            "total_completed_episodes": aggregate["total_completed_episodes"],
             "success_rate": aggregate["macro_average"],
             "success_rate_percent": aggregate["macro_average_percent"],
+            "error_rate": aggregate["error_rate"],
+            "error_rate_percent": aggregate["error_rate_percent"],
             "mean_episode_steps": "",
             "mean_successful_episode_steps": "",
             "mean_failed_episode_steps": "",

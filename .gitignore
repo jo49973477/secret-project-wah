@@ -184,8 +184,14 @@ examples/UniVTAC/*
 !examples/UniVTAC/univtac_rollout/
 examples/UniVTAC/univtac_rollout/*
 !examples/UniVTAC/univtac_rollout/checkpoint.py
+!examples/UniVTAC/univtac_rollout/dashboard.py
+!examples/UniVTAC/univtac_rollout/diagnostics.py
 !examples/UniVTAC/univtac_rollout/multimodal.py
+!examples/UniVTAC/univtac_rollout/monitoring.py
+!examples/UniVTAC/univtac_rollout/notifications.py
+!examples/UniVTAC/univtac_rollout/profiling.py
 !examples/UniVTAC/univtac_rollout/sensors.py
+!examples/UniVTAC/univtac_rollout/telemetry.py
 *mp4
 *.parquet
 *.whl

@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.types import ModalityConfig
@@ -169,6 +170,22 @@ def main(config: ServerConfig):
         host=config.host,
         port=config.port,
     )
+    # Preserve the normal two-item (action, info) response and add timing only
+    # to the informational mapping. This does not synchronize CUDA or mutate
+    # model inputs/outputs.
+    original_get_action = policy.get_action
+
+    def profiled_get_action(**kwargs):
+        started_ns = time.perf_counter_ns()
+        result = original_get_action(**kwargs)
+        elapsed_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
+        if isinstance(result, (list, tuple)) and len(result) == 2:
+            info = dict(result[1]) if isinstance(result[1], dict) else {}
+            info["__server_inference_ms"] = elapsed_ms
+            return result[0], info
+        return result
+
+    server.register_endpoint("get_action", profiled_get_action)
     if hasattr(policy, "get_model_info"):
         server.register_endpoint("get_model_info", policy.get_model_info, requires_input=False)
     with server:

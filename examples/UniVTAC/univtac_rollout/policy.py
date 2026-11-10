@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import numpy as np
@@ -17,6 +18,7 @@ from .multimodal import (
     load_sensor_contract,
     validate_contract,
 )
+from .profiling import GLOBAL_PROFILER, RuntimeProfiler
 
 
 def validate_rgb_checkpoint_contract(configs: dict[str, Any], execution_horizon: int) -> None:
@@ -42,11 +44,15 @@ class Gr00tUniVTACPolicy:
         policy: str = "auto",
         sensor_contract: str | None = None,
         scene_calibration: str | None = None,
+        profiler: RuntimeProfiler | None = None,
+        log_level: str = "normal",
     ):
         if execution_horizon < 1:
             raise ValueError("execution_horizon must be positive.")
         self.execution_horizon = execution_horizon
-        self.client = MinimalPolicyClient(host, port, timeout_ms=timeout_ms)
+        self.profiler = profiler or GLOBAL_PROFILER
+        self.log_level = log_level
+        self.client = MinimalPolicyClient(host, port, timeout_ms=timeout_ms, profiler=self.profiler)
         try:
             if not self.client.ping():
                 raise ConnectionError(f"GR00T server at {host}:{port} returned an invalid ping.")
@@ -70,15 +76,16 @@ class Gr00tUniVTACPolicy:
             )
             self.history = ObservationHistory(self.modality_configs, contract)
             self._latest_formatted = None
-            print(
-                f"Policy={self.policy_type} checkpoint={self.model_info['checkpoint_identity']} "
-                f"DiT={self.model_info.get('dit_type')} mode={self.model_info.get('dit_training_mode')} "
-                f"Sidecar={self.model_info.get('sidecar_type')} LoRA={self.model_info.get('dit_lora_enabled')} "
-                f"modalities={list(self.modality_configs)} "
-                f"windows={ {k: len(field(v, 'delta_indices')) for k, v in self.modality_configs.items()} } "
-                f"action_shape=[1,{self.model_info.get('action_horizon')},8]",
-                flush=True,
-            )
+            if self.log_level == "debug":
+                print(
+                    f"Policy={self.policy_type} checkpoint={self.model_info['checkpoint_identity']} "
+                    f"DiT={self.model_info.get('dit_type')} mode={self.model_info.get('dit_training_mode')} "
+                    f"Sidecar={self.model_info.get('sidecar_type')} LoRA={self.model_info.get('dit_lora_enabled')} "
+                    f"modalities={list(self.modality_configs)} "
+                    f"windows={ {k: len(field(v, 'delta_indices')) for k, v in self.modality_configs.items()} } "
+                    f"action_shape=[1,{self.model_info.get('action_horizon')},8]",
+                    flush=False,
+                )
         except Exception:
             self.client.close()
             raise
@@ -104,10 +111,14 @@ class Gr00tUniVTACPolicy:
         ):
             formatted = self._latest_formatted
         else:
+            observation_started = time.perf_counter_ns()
             self.record_observation(
                 observation,
                 instruction,
                 self.history.timestamp + 1 if timestamp is None else timestamp,
+            )
+            self.profiler.record_ns(
+                "inference.observation_preparation", time.perf_counter_ns() - observation_started
             )
             formatted = self._latest_formatted
         if self.history.timestamp == 0:
@@ -123,7 +134,8 @@ class Gr00tUniVTACPolicy:
             if "temporal_valid" in formatted:
                 valid = formatted["temporal_valid"]
                 shapes["temporal_valid"] = (valid.shape, str(valid.dtype))
-            print("Input shapes: " + repr(shapes), flush=True)
+            if self.log_level == "debug":
+                print("Input shapes: " + repr(shapes), flush=False)
         chunk = extract_action_chunk(self.client.get_action(formatted))
         expected_horizon = self.model_info.get("action_horizon")
         if expected_horizon is not None and len(chunk) != expected_horizon:
