@@ -147,6 +147,71 @@ The evaluator continues to create `episodes.csv`, `summary.csv`, `summary.json`,
 `summary.txt`, `summary.md`, `runtime_metadata.json`, and episode videos. It still
 refuses an output directory containing prior evaluation results.
 
+### WAH Rollout Analyzer (post-rollout HTML)
+
+`scripts/report_univtac_rollout.py` turns existing result artifacts into a polished,
+static, offline research dashboard. It is postprocessing only: it does not import
+Isaac Sim, load a model, contact a server, or modify the rollout directory's source
+artifacts. The report includes Overview, Task Analysis, Episode Explorer, Error
+Diagnostics, Performance / Latency, and Compare Runs views. MP4s remain separate
+files and are linked with HTML5 video controls rather than embedded as base64.
+
+![WAH Rollout Analyzer overview](wah_rollout_analyzer_preview.png)
+
+Generate a single-run report (the default output is `$RUN/report/index.html`):
+
+```bash
+python scripts/report_univtac_rollout.py --run "$RUN"
+```
+
+Compare a GR00T action-head fine-tuned baseline with WAH Temporal Sidecar + DiT LoRA:
+
+```bash
+python scripts/report_univtac_rollout.py \
+  --run /results/gr00t_action_head_baseline \
+  --run /results/wah_temporal_dit_lora \
+  --label "GR00T Baseline" \
+  --label "WAH Temporal + DiT LoRA" \
+  --output /results/comparison/index.html
+```
+
+The output is one `index.html`; videos and logs stay under their original rollout
+roots. Open it directly, or use a local server if the browser restricts `file://`
+video playback:
+
+```bash
+python -m http.server --directory /results 8000
+# Visit http://localhost:8000/comparison/
+```
+
+Success, failure, and error have distinct meanings. **Success Rate** is
+`successes / (successes + failures)`, matching `core.py`; evaluation errors are
+excluded. **Overall Success Fraction** is `successes / completed rows`, so an
+error-heavy experiment is not presented as healthy. **Error Rate** is
+`errors / completed rows`. Macro success gives each selected task equal weight;
+micro success pools all valid evaluated episodes. **Evaluation Coverage** is valid
+evaluated episodes divided by planned episodes when the plan is known. Unknown
+metrics display `N/A`, never a fabricated zero.
+
+Error Diagnostics preserves original text while grouping evidence for invalid
+actions, joint-limit violations, NaN/Inf, shape mismatch, missing modalities,
+timeouts, server failures, and worker failures. Joint/DOF values and bounds appear
+only when recorded in artifacts. If action-level evidence is absent, rerun the
+evaluation with `--rollout-diagnostics full --diagnostic-sample-every 1`; the report
+never infers a root cause from missing data.
+
+For comparison, the analyzer checks recorded tasks, seed start, episode count,
+execution horizon, step limit, task configuration, instruction type, policy type,
+dataset, and environment metadata. It warns when recorded protocols differ, treats
+missing tasks as `N/A`, and labels results paired only when task/seed matches exist.
+
+Known limitations: old runs can expose only fields they recorded; some protocol
+metadata is absent from current `summary.json`; exact percentile aggregation across
+worker summaries is not reconstructable without raw samples; and browsers vary in
+their support for local MP4 playback. Report generation is intentionally standalone
+and is not currently invoked automatically by the rollout launcher, so report
+failures cannot affect rollout exit semantics.
+
 ### trainctl rollout supervision and notifications
 
 Add `--trainctl-enabled` to the local or split launcher. The deployment controller

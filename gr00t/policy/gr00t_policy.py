@@ -91,6 +91,40 @@ def validate_wah_restoration(model: Any, loading_info: dict[str, Any]) -> None:
         )
 
 
+def validate_model_processor_compatibility(
+    config: Any, modality_configs: dict[str, ModalityConfig]
+) -> None:
+    """Validate sensor contracts that are required by the selected action-head architecture."""
+    dit_type = getattr(config, "dit_type", "alternate_vl_dit")
+    if dit_type in {"multimodal_conditioned_dit", "sidecar_conditioned_dit"}:
+        for modality, flag in (
+            ("pointcloud", "use_point_conditioning"),
+            ("tactile", "use_tactile_conditioning"),
+        ):
+            model_requires = bool(getattr(config, flag, False))
+            processor_has = modality in modality_configs
+            if model_requires != processor_has:
+                raise ValueError(
+                    f"Checkpoint model {flag}={model_requires} conflicts with processor "
+                    f"{modality} configured={processor_has}. Refusing mismatched modalities."
+                )
+
+    window = int(getattr(config, "temporal_window_size", 0) or 0)
+    if window:
+        for modality, count in (
+            ("state", window),
+            ("pointcloud", window),
+            ("tactile", window + 1),
+        ):
+            configured = modality_configs.get(modality)
+            actual = len(configured.delta_indices) if configured is not None else 0
+            if actual != count:
+                raise ValueError(
+                    f"Checkpoint temporal_window_size={window} requires {modality} "
+                    f"window {count}, processor declares {actual}."
+                )
+
+
 def _sim_language_batch_to_sequence(value: Any) -> Any:
     """Normalize sim language batches while preserving validation semantics."""
     if isinstance(value, np.ndarray):
@@ -204,31 +238,7 @@ class Gr00tPolicy(BasePolicy):
             for k, v in all_modality_configs[self.embodiment_tag.value].items()
             if k != "rl_info"
         }
-        for modality, flag in (
-            ("pointcloud", "use_point_conditioning"),
-            ("tactile", "use_tactile_conditioning"),
-        ):
-            model_requires = bool(getattr(model.config, flag, False))
-            processor_has = modality in self.modality_configs
-            if model_requires != processor_has:
-                raise ValueError(
-                    f"Checkpoint model {flag}={model_requires} conflicts with processor "
-                    f"{modality} configured={processor_has}. Refusing mismatched modalities."
-                )
-        window = int(getattr(model.config, "temporal_window_size", 0) or 0)
-        if window:
-            for modality, count in (
-                ("state", window),
-                ("pointcloud", window),
-                ("tactile", window + 1),
-            ):
-                configured = self.modality_configs.get(modality)
-                actual = len(configured.delta_indices) if configured is not None else 0
-                if actual != count:
-                    raise ValueError(
-                        f"Checkpoint temporal_window_size={window} requires {modality} "
-                        f"window {count}, processor declares {actual}."
-                    )
+        validate_model_processor_compatibility(model.config, self.modality_configs)
         self.collate_fn = self.processor.collator
 
         # Extract and validate language configuration

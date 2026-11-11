@@ -20,9 +20,11 @@ Uses mocked model and processor to avoid downloading checkpoints.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from gr00t.data.types import ModalityConfig
+from gr00t.policy.gr00t_policy import validate_model_processor_compatibility
 import numpy as np
 import pytest
 import torch
@@ -47,6 +49,87 @@ def _build_modality_configs():
             "language": ModalityConfig(delta_indices=[0], modality_keys=[LANGUAGE_KEY]),
         }
     }
+
+
+def _sensor_modalities(*names: str, state_window: int = 1) -> dict[str, ModalityConfig]:
+    modalities = {
+        "state": ModalityConfig(delta_indices=list(range(state_window)), modality_keys=["joint"])
+    }
+    if "pointcloud" in names:
+        modalities["pointcloud"] = ModalityConfig(delta_indices=[0], modality_keys=["scene"])
+    if "tactile" in names:
+        modalities["tactile"] = ModalityConfig(delta_indices=[0], modality_keys=["rgb"])
+    return modalities
+
+
+class TestModelProcessorCompatibility:
+    @pytest.mark.parametrize("dit_type", ["alternate_vl_dit", "dit"])
+    def test_rgb_architecture_ignores_unused_multimodal_defaults(self, dit_type):
+        config = SimpleNamespace(
+            dit_type=dit_type,
+            use_point_conditioning=True,
+            use_tactile_conditioning=True,
+            temporal_window_size=0,
+        )
+
+        validate_model_processor_compatibility(config, _sensor_modalities())
+
+    def test_multimodal_requires_configured_pointcloud(self):
+        config = SimpleNamespace(
+            dit_type="multimodal_conditioned_dit",
+            use_point_conditioning=True,
+            use_tactile_conditioning=False,
+            temporal_window_size=0,
+        )
+
+        with pytest.raises(ValueError, match="use_point_conditioning=True"):
+            validate_model_processor_compatibility(config, _sensor_modalities())
+
+    def test_multimodal_rejects_unexpected_pointcloud(self):
+        config = SimpleNamespace(
+            dit_type="multimodal_conditioned_dit",
+            use_point_conditioning=False,
+            use_tactile_conditioning=False,
+            temporal_window_size=0,
+        )
+
+        with pytest.raises(ValueError, match="use_point_conditioning=False"):
+            validate_model_processor_compatibility(config, _sensor_modalities("pointcloud"))
+
+    def test_sidecar_requires_configured_tactile(self):
+        config = SimpleNamespace(
+            dit_type="sidecar_conditioned_dit",
+            use_point_conditioning=False,
+            use_tactile_conditioning=True,
+            temporal_window_size=0,
+        )
+
+        with pytest.raises(ValueError, match="use_tactile_conditioning=True"):
+            validate_model_processor_compatibility(config, _sensor_modalities())
+
+    def test_sidecar_accepts_matching_sensor_contract(self):
+        config = SimpleNamespace(
+            dit_type="sidecar_conditioned_dit",
+            use_point_conditioning=True,
+            use_tactile_conditioning=True,
+            temporal_window_size=0,
+        )
+
+        validate_model_processor_compatibility(
+            config, _sensor_modalities("pointcloud", "tactile")
+        )
+
+    def test_temporal_window_validation_remains_enforced(self):
+        config = SimpleNamespace(
+            dit_type="sidecar_conditioned_dit",
+            use_point_conditioning=True,
+            use_tactile_conditioning=True,
+            temporal_window_size=2,
+        )
+        modalities = _sensor_modalities("pointcloud", "tactile", state_window=2)
+
+        with pytest.raises(ValueError, match="pointcloud window 2, processor declares 1"):
+            validate_model_processor_compatibility(config, modalities)
 
 
 @pytest.fixture
