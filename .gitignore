@@ -22,6 +22,8 @@ wandb/
 outputs/
 logs/
 runs/
+checkpoint/
+checkpoints/
 out/
 recordings/
 plots/
