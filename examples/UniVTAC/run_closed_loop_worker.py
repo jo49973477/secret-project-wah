@@ -151,6 +151,16 @@ def _git_value(path: Path, *arguments: str) -> str | None:
         return None
 
 
+def _configure_tactile_observations(
+    observations: dict, modality_configs: dict, sensor_contract: dict | None
+) -> None:
+    """Request only the trained tactile stream, overriding task YAML defaults."""
+    observations.pop("tactile", None)
+    if "tactile" in modality_configs:
+        source = sensor_contract["tactile"]["rgb"]["source_key"].split("/")[-1]
+        observations["tactile"] = [source]
+
+
 def _config_profile(config: dict[str, Any]) -> tuple[str, str, str]:
     if "env_settings" in config or "observation_settings" in config:
         required = {"env_settings", "observation_settings"}
@@ -725,7 +735,6 @@ def _run(
     required_observations = {
         "camera": {"rgb"},
         "embodiment": {"joint"},
-        "tactile": {"rgb_marker"},
     }
     for group, required in required_observations.items():
         actual = set(observations.get(group, []))
@@ -810,10 +819,9 @@ def _run(
             embodiment_types = env_cfg.obs_data_type.setdefault("embodiment", [])
             if "ee" not in embodiment_types:
                 embodiment_types.append("ee")
-            source = policy.history.sensor_contract["tactile"]["rgb"]["source_key"].split("/")[-1]
-            tactile_types = env_cfg.obs_data_type.setdefault("tactile", [])
-            if source not in tactile_types:
-                tactile_types.append(source)
+        _configure_tactile_observations(
+            env_cfg.obs_data_type, policy.modality_configs, policy.history.sensor_contract
+        )
         _diagnostic("policy_initialization", "complete", level="normal")
 
         _write_worker_results(
@@ -828,7 +836,11 @@ def _run(
         _diagnostic("task_construction", "complete", level="normal")
         metadata.update(_inspect_articulation(task))
         if policy.policy_type == "wah":
-            sensor_adapter = UniVTACSensorAdapter(task, policy.history.sensor_contract)
+            sensor_adapter = UniVTACSensorAdapter(
+                task,
+                policy.history.sensor_contract,
+                require_tactile="tactile" in policy.modality_configs,
+            )
             metadata["wah_sensor_adapter"] = sensor_adapter.metadata
             _diagnostic("wah_sensor_adapter", json.dumps(sensor_adapter.metadata, sort_keys=True))
         video_monitor = _instrument_video_handler(task)

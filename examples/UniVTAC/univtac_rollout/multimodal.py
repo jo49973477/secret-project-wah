@@ -51,8 +51,8 @@ def validate_contract(configs: dict[str, Any], execution_horizon: int, requested
     missing = set(expected).difference(configs)
     if missing.intersection({"video", "state", "action", "language"}):
         raise ValueError(f"Checkpoint modality config is missing {sorted(missing)}")
-    if kind == "wah" and {"pointcloud", "tactile"}.intersection(missing):
-        raise ValueError("WAH rollout needs both pointcloud.scene and tactile.rgb.")
+    if kind == "wah" and "pointcloud" not in configs:
+        raise ValueError("WAH rollout needs pointcloud.scene.")
     for name, config in configs.items():
         if name not in expected or field(config, "modality_keys") != expected[name]:
             raise ValueError(
@@ -73,17 +73,18 @@ def validate_contract(configs: dict[str, Any], execution_horizon: int, requested
     return kind
 
 
-def load_sensor_contract(path: str | Path | None) -> dict[str, Any]:
+def load_sensor_contract(
+    path: str | Path | None, *, require_tactile: bool = True
+) -> dict[str, Any]:
     if path is None:
         raise ValueError(
             "WAH requires --sensor-contract with the training dataset meta/modality.json. "
-            "It records point sampling and the actual tactile source."
+            "It records point sampling and, when required, the actual tactile source."
         )
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     scene = data.get("pointcloud", {}).get("scene")
-    tactile = data.get("tactile", {}).get("rgb")
-    if not isinstance(scene, dict) or not isinstance(tactile, dict):
-        raise ValueError("Sensor contract needs pointcloud.scene and tactile.rgb entries.")
+    if not isinstance(scene, dict):
+        raise ValueError("Sensor contract needs a pointcloud.scene entry.")
     for key in ("num_points", "feature_dim", "voxel_size_m", "coordinate_frame"):
         if key not in scene:
             raise ValueError(f"Sensor contract pointcloud.scene is missing {key}.")
@@ -99,6 +100,11 @@ def load_sensor_contract(path: str | Path | None) -> dict[str, Any]:
             "WAH sensor contract source_cameras must be ordered ['head', 'wrist']; "
             f"got {source_cameras!r}."
         )
+    if not require_tactile:
+        return data
+    tactile = data.get("tactile", {}).get("rgb")
+    if not isinstance(tactile, dict):
+        raise ValueError("Sensor contract needs a tactile.rgb entry.")
     source_key = tactile.get("source_key")
     source_parts = source_key.split("/") if isinstance(source_key, str) else []
     if (
@@ -324,6 +330,8 @@ class ObservationHistory:
     """Synchronized per-inference samples with episode-start repeat padding."""
 
     def __init__(self, configs: dict[str, Any], sensor_contract: dict[str, Any] | None):
+        if {"pointcloud", "tactile"}.intersection(configs) and sensor_contract is None:
+            raise ValueError("Active pointcloud/tactile modalities require a sensor contract.")
         self.configs = configs
         self.sensor_contract = sensor_contract
         self.capacity = 1 + max(
@@ -346,10 +354,11 @@ class ObservationHistory:
             name: {key: value[0, 0] for key, value in rgb[name].items()}
             for name in ("video", "state")
         }
-        if self.sensor_contract is not None:
+        if "pointcloud" in self.configs:
             frame["pointcloud"] = {
                 "scene": scene_frame(observation, self.sensor_contract, timestamp)
             }
+        if "tactile" in self.configs:
             frame["tactile"] = {"rgb": tactile_frame(observation, self.sensor_contract)}
         self.frames.append(frame)
         self.timestamp = timestamp

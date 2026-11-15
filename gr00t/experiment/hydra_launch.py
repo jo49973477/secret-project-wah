@@ -107,6 +107,16 @@ def resolve_resume(cfg: DictConfig, config) -> Path | None:
     differences = []
     for section in ("model", "data", "training", "hardware"):
         before, after = dict(old[section]), dict(new[section])
+        if section == "model":
+            defaults = {
+                "sidecar_variant": "legacy",
+                "sidecar_point_stage_names": None,
+                "sidecar_local_patch_size": 64,
+                "sidecar_window_chunk_size": 16,
+            }
+            for key, value in defaults.items():
+                before.setdefault(key, value)
+                after.setdefault(key, value)
         ignored = (
             allowed_training_changes
             if section == "training"

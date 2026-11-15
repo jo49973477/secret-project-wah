@@ -22,6 +22,11 @@ class SidecarConditionedDiT(AlternateVLDiT):
     def __init__(
         self,
         *,
+        sidecar_variant="legacy",
+        sidecar_point_stage_names=None,
+        sidecar_point_stage_dims=None,
+        sidecar_local_patch_size=64,
+        sidecar_window_chunk_size=16,
         sidecar_num_stages=4,
         sidecar_stage_indices=None,
         sidecar_hidden_dim=256,
@@ -49,13 +54,46 @@ class SidecarConditionedDiT(AlternateVLDiT):
         self.stage_indices = stage_indices(
             len(self.transformer_blocks), sidecar_num_stages, sidecar_stage_indices
         )
-        self.sidecar_pool = TokenPool(
-            self.inner_dim, sidecar_hidden_dim, sidecar_num_point_tokens, sidecar_num_heads
-        )
-        self.sidecar_stages = nn.ModuleList(
-            PointActionStage(self.inner_dim, sidecar_hidden_dim, sidecar_num_heads)
-            for _ in self.stage_indices
-        )
+        if sidecar_variant not in {"legacy", "multilevel_local"}:
+            raise ValueError(f"Unknown sidecar_variant: {sidecar_variant}")
+        self.sidecar_variant = sidecar_variant
+        self.sidecar_point_stage_names = list(sidecar_point_stage_names or [])
+        if sidecar_variant == "legacy":
+            self.sidecar_pool = TokenPool(
+                self.inner_dim, sidecar_hidden_dim, sidecar_num_point_tokens, sidecar_num_heads
+            )
+            self.sidecar_stages = nn.ModuleList(
+                PointActionStage(self.inner_dim, sidecar_hidden_dim, sidecar_num_heads)
+                for _ in self.stage_indices
+            )
+        else:
+            from gr00t.model.extension.multilevel_local_sidecar import LocalJointActionStage
+
+            if tactile_fusion_mode != "none" or contact_input_mode != "none":
+                raise ValueError(
+                    "multilevel_local requires tactile_fusion_mode=none and contact_input_mode=none"
+                )
+            if (
+                len(self.sidecar_point_stage_names) != len(self.stage_indices)
+                or len(set(self.sidecar_point_stage_names)) != len(self.stage_indices)
+                or sidecar_point_stage_dims is None
+                or len(sidecar_point_stage_dims) != len(self.stage_indices)
+            ):
+                raise ValueError(
+                    "multilevel_local requires validated distinct point stage names and dimensions"
+                )
+            self.sidecar_pool = nn.Identity()  # no pooling parameters or pooled tokens
+            self.sidecar_stages = nn.ModuleList(
+                LocalJointActionStage(
+                    self.inner_dim,
+                    point_dim,
+                    sidecar_hidden_dim,
+                    sidecar_num_heads,
+                    sidecar_local_patch_size,
+                    sidecar_window_chunk_size,
+                )
+                for point_dim in sidecar_point_stage_dims
+            )
         self.contact_adapter = ContactSurprise(
             self.inner_dim,
             contact_hidden_dim,
@@ -181,13 +219,29 @@ class SidecarConditionedDiT(AlternateVLDiT):
                 "interleave_self_attention=True"
             )
 
-        if point_tokens is not None and point_tokens.shape[0] != batch_size:
+        if self.sidecar_variant == "multilevel_local" and point_tokens is not None:
+            if not isinstance(point_tokens, dict) or set(point_tokens) != set(
+                self.sidecar_point_stage_names
+            ):
+                raise ValueError(
+                    "multilevel_local point tokens must contain the configured stage mapping"
+                )
+            if point_attention_mask is not None:
+                raise ValueError("Packed multilevel stages use offsets, not point_attention_mask")
+            for name in self.sidecar_point_stage_names:
+                if len(point_tokens[name]["offset"]) != batch_size:
+                    raise ValueError("Multilevel point batch size does not match actions")
+        if (
+            self.sidecar_variant == "legacy"
+            and point_tokens is not None
+            and point_tokens.shape[0] != batch_size
+        ):
             raise ValueError("hidden_states and point_tokens must share a batch size.")
         if tactile_tokens is not None and tactile_tokens.shape[0] != batch_size:
             raise ValueError("hidden_states and tactile_tokens must share a batch size.")
         # Point and tactile encoders have independent compute islands. Join the
         # DiT activation stream explicitly before LayerNorm and MHA Q/K/V.
-        if point_tokens is not None:
+        if self.sidecar_variant == "legacy" and point_tokens is not None:
             point_tokens = point_tokens.to(dtype=hidden_states.dtype)
         if tactile_tokens is not None:
             tactile_tokens = tactile_tokens.to(dtype=hidden_states.dtype)
@@ -195,7 +249,11 @@ class SidecarConditionedDiT(AlternateVLDiT):
             ("point_tokens", point_tokens),
             ("tactile_tokens", tactile_tokens),
         ):
-            if tokens is not None and tokens.shape[-1] != self.inner_dim:
+            if (
+                tokens is not None
+                and not isinstance(tokens, dict)
+                and tokens.shape[-1] != self.inner_dim
+            ):
                 raise ValueError(
                     f"{token_name} width must be {self.inner_dim}, got {tokens.shape[-1]}."
                 )
@@ -212,7 +270,10 @@ class SidecarConditionedDiT(AlternateVLDiT):
         # All evolving values are local: never cache action-dependent point tokens.
         points = point_mask = None
         if point_tokens is not None:
-            points, point_mask = self.sidecar_pool(point_tokens, point_attention_mask)
+            if self.sidecar_variant == "legacy":
+                points, point_mask = self.sidecar_pool(point_tokens, point_attention_mask)
+            else:
+                points = point_tokens
         contact_tokens = contact_mask = None
         self.contact_diagnostics = {}
         self.contact_prediction_loss = hidden_states.new_zeros((), dtype=torch.float32)
@@ -280,14 +341,35 @@ class SidecarConditionedDiT(AlternateVLDiT):
                         if hidden_attention_mask is None
                         else hidden_attention_mask[:, num_state_tokens:]
                     )
-                    action, points = self.sidecar_stages[stage](
-                        action,
-                        points,
-                        point_mask,
-                        action_mask,
-                        getattr(self, "_diagnostic_observer", None),
-                        stage,
-                    )
+                    if self.sidecar_variant == "legacy":
+                        action, points = self.sidecar_stages[stage](
+                            action,
+                            points,
+                            point_mask,
+                            action_mask,
+                            getattr(self, "_diagnostic_observer", None),
+                            stage,
+                        )
+                    else:
+                        name = self.sidecar_point_stage_names[stage]
+                        local_args = (
+                            action,
+                            points[name],
+                            None,
+                            action_mask,
+                            getattr(self, "_diagnostic_observer", None),
+                            stage,
+                        )
+                        if torch.is_grad_enabled() and self.gradient_checkpointing:
+                            from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
+
+                            # Recompute through the module post-hooks as well as its tensors.
+                            with set_checkpoint_early_stop(False):
+                                action, _ = checkpoint(
+                                    self.sidecar_stages[stage], *local_args, use_reentrant=False
+                                )
+                        else:
+                            action, _ = self.sidecar_stages[stage](*local_args)
                 if contact_tokens is not None and self.contact_injection_enabled:
                     before_contact = action
                     action = self.contact_injections[stage](action, contact_tokens, contact_mask)

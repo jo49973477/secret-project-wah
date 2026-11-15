@@ -1,0 +1,7 @@
+# @package _global_
+defaults:
+- wah_multilevel_local_frozen
+- _self_
+name: wah_multilevel_local_lora
+dit_training:
+  mode: lora

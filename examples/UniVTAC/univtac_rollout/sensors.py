@@ -124,7 +124,8 @@ def _tactile_runtime_mapping(task: Any, source_key: str) -> tuple[str, str]:
 class UniVTACSensorAdapter:
     """Attach live RGB-D calibration and the exact training tactile stream to observations."""
 
-    def __init__(self, task: Any, sensor_contract: dict[str, Any]):
+    def __init__(self, task: Any, sensor_contract: dict[str, Any], *, require_tactile: bool = True):
+        self.require_tactile = require_tactile
         self.task = task
         manager = getattr(task, "_camera_manager", None)
         self.cameras = getattr(manager, "cameras", None)
@@ -134,14 +135,15 @@ class UniVTACSensorAdapter:
                 f"{sorted(self.cameras) if isinstance(self.cameras, dict) else None}."
             )
         self.depth_scale = _isaac_depth_scale_to_meters()
-        source_key = sensor_contract["tactile"]["rgb"]["source_key"]
-        self.tactile_source_key = source_key
-        self.tactile_runtime_sensor, self.tactile_stream = _tactile_runtime_mapping(
-            task, source_key
-        )
-        self.tactile_encoding = (
-            UNIVTAC_TACTILE_RGB_ENCODING if self.tactile_stream == "rgb" else UINT8_RGB_ENCODING
-        )
+        if require_tactile:
+            source_key = sensor_contract["tactile"]["rgb"]["source_key"]
+            self.tactile_source_key = source_key
+            self.tactile_runtime_sensor, self.tactile_stream = _tactile_runtime_mapping(
+                task, source_key
+            )
+            self.tactile_encoding = (
+                UNIVTAC_TACTILE_RGB_ENCODING if self.tactile_stream == "rgb" else UINT8_RGB_ENCODING
+            )
         self._tactile_diagnostic_logged = False
         self._head_transform: np.ndarray | None = None
         self.metadata = {
@@ -151,14 +153,18 @@ class UniVTACSensorAdapter:
             "camera_frame": OPTICAL_FRAME_CONVENTION,
             "base_frame_source": "live articulation root-link pose",
             "camera_pose_source": "live TiledCamera.data.pos_w + quat_w_ros",
-            "tactile_source_key": source_key,
-            "tactile_runtime_sensor": self.tactile_runtime_sensor,
-            "tactile_runtime_encoding": self.tactile_encoding,
             "camera_prim_paths": {
                 name: str(getattr(getattr(camera, "cfg", None), "prim_path", ""))
                 for name, camera in self.cameras.items()
             },
         }
+
+        if require_tactile:
+            self.metadata.update(
+                tactile_source_key=self.tactile_source_key,
+                tactile_runtime_sensor=self.tactile_runtime_sensor,
+                tactile_runtime_encoding=self.tactile_encoding,
+            )
 
     def _base_transform(self) -> np.ndarray:
         manager = getattr(self.task, "_robot_manager", None)
@@ -246,6 +252,9 @@ class UniVTACSensorAdapter:
                 }
             )
         self.metadata["last_wrist_T_base_camera"] = calibrations["wrist"]["T_base_camera"].tolist()
+
+        if not self.require_tactile:
+            return observation
 
         tactile = observation.get("tactile")
         runtime_sensor = (

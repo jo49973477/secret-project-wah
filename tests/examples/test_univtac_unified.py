@@ -21,6 +21,7 @@ from univtac_rollout.multimodal import (  # noqa: E402
     ObservationHistory,
     add_scene_calibration,
     detect_policy,
+    load_sensor_contract,
     scene_frame,
     tactile_frame,
     validate_contract,
@@ -98,7 +99,7 @@ def test_wah_detection_and_explicit_rgb_rejection() -> None:
         validate_contract(configs(True), 1, "rgb")
     incomplete = configs(True)
     del incomplete["pointcloud"]
-    with pytest.raises(ValueError, match="both pointcloud.scene and tactile.rgb"):
+    with pytest.raises(ValueError, match="needs pointcloud.scene"):
         validate_contract(incomplete, 1, "auto")
 
 
@@ -231,8 +232,9 @@ def test_scene_calibration_json_is_validated_without_static_wrist(tmp_path: Path
         add_scene_calibration(contract(), path)
 
 
+@pytest.mark.parametrize("require_tactile", [False, True])
 def test_live_univtac_sensor_adapter_uses_per_frame_optical_camera_poses(
-    monkeypatch, caplog
+    monkeypatch, caplog, require_tactile
 ) -> None:
     class CameraData:
         def __init__(self, position):
@@ -267,7 +269,10 @@ def test_live_univtac_sensor_adapter_uses_per_frame_optical_camera_poses(
     sensor_contract = contract()
     sensor_contract["tactile"]["rgb"]["source_key"] = "tactile/left_gsmini/rgb"
     monkeypatch.setattr("univtac_rollout.sensors._isaac_depth_scale_to_meters", lambda: 1.0)
-    adapter = UniVTACSensorAdapter(task, sensor_contract)
+    if not require_tactile:
+        del task._tactile_manager
+        sensor_contract.pop("tactile")
+    adapter = UniVTACSensorAdapter(task, sensor_contract, require_tactile=require_tactile)
 
     def live_observation(value=0.5):
         return {
@@ -283,6 +288,18 @@ def test_live_univtac_sensor_adapter_uses_per_frame_optical_camera_poses(
                 "right_tactile": {"rgb": np.zeros((2, 2, 3), dtype=np.uint8)},
             },
         }
+
+    if not require_tactile:
+        obs = live_observation()
+        obs.pop("tactile")
+        attached = adapter.attach(obs)
+        assert "tactile" not in attached
+        assert not any(key.startswith("tactile") for key in adapter.metadata)
+        assert scene_frame(attached, sensor_contract, 0).shape == (4, 6)
+        del obs["observation"]["head"]["depth"]
+        with pytest.raises(ValueError, match="aligned RGB and depth"):
+            adapter.attach(obs)
+        return
 
     first = adapter.attach(live_observation())
     np.testing.assert_allclose(first["observation"]["head"]["T_base_camera"][:3, 3], [1, 0, 0])
@@ -656,3 +673,66 @@ def test_signal_cleanup_stops_owned_server_and_rollout(monkeypatch, tmp_path: Pa
     assert deployment.run(args, []) == 130
     assert spawned[0] in stopped and spawned[1] in stopped
     assert (args.output_dir / "runtime_metadata.json").is_file()
+
+
+@pytest.mark.parametrize("mode", ["rgb", "point", "point_tactile"])
+def test_active_modality_contract_and_history(mode, tmp_path):
+    import json
+
+    active = configs()
+    sensor_contract = contract()
+    obs = observation()
+    if mode != "rgb":
+        active["pointcloud"] = {"delta_indices": [0], "modality_keys": ["scene"]}
+    if mode == "point_tactile":
+        active["tactile"] = {"delta_indices": [0], "modality_keys": ["rgb"]}
+    else:
+        sensor_contract.pop("tactile")
+        obs.pop("tactile")
+    assert validate_contract(active, 1, "auto") == ("rgb" if mode == "rgb" else "wah")
+    path = tmp_path / "modality.json"
+    path.write_text(json.dumps(sensor_contract))
+    loaded = load_sensor_contract(path, require_tactile=mode == "point_tactile")
+    result = ObservationHistory(active, loaded).append(obs, "lift can", 0)
+    assert set(result) == set(active) - {"action"}
+    if mode != "rgb":
+        assert result["pointcloud"]["scene"].shape == (1, 1, 4, 6)
+        assert "temporal_valid" not in result
+    if mode == "point_tactile":
+        assert result["tactile"]["rgb"].dtype == np.uint8
+        obs.pop("tactile")
+        with pytest.raises(ValueError, match="trained from"):
+            ObservationHistory(active, loaded).append(obs, "task", 0)
+    else:
+        assert "tactile" not in result
+        with pytest.raises(ValueError, match="tactile.rgb"):
+            load_sensor_contract(path)
+    if mode != "rgb":
+        obs["observation"].pop("pointcloud")
+        with pytest.raises(ValueError, match="calibrated head and wrist RGB-D"):
+            ObservationHistory(active, loaded).append(obs, "task", 0)
+        sensor_contract.pop("pointcloud")
+        path.write_text(json.dumps(sensor_contract))
+        with pytest.raises(ValueError, match="pointcloud.scene"):
+            load_sensor_contract(path, require_tactile=mode == "point_tactile")
+
+
+@pytest.mark.parametrize("mode", ["rgb", "point", "point_tactile"])
+def test_worker_requests_only_required_tactile_stream(mode):
+    from run_closed_loop_worker import _configure_tactile_observations
+
+    active = configs()
+    if mode != "rgb":
+        active["pointcloud"] = {"delta_indices": [0], "modality_keys": ["scene"]}
+    sensor_contract = None
+    if mode == "point_tactile":
+        active["tactile"] = {"delta_indices": [0], "modality_keys": ["rgb"]}
+        sensor_contract = contract()
+        sensor_contract["tactile"]["rgb"]["source_key"] = "tactile/left_gsmini/rgb"
+    streams = {"camera": ["rgb", "depth"], "tactile": ["rgb_marker", "depth"]}
+    _configure_tactile_observations(streams, active, sensor_contract)
+    assert streams["camera"] == ["rgb", "depth"]
+    if mode == "point_tactile":
+        assert streams["tactile"] == ["rgb"]
+    else:
+        assert "tactile" not in streams

@@ -151,6 +151,27 @@ def initialize_missing_sidecar(model, missing_keys):
             dit.inner_dim, cfg.max_state_dim, cfg.temporal_window_size
         ),
     }
+    if getattr(cfg, "sidecar_variant", "legacy") == "multilevel_local":
+        from gr00t.model.extension.multilevel_local_sidecar import (
+            LocalJointActionStage,
+            resolve_point_stages,
+        )
+
+        _, dimensions = resolve_point_stages(
+            cfg.point_encoder_model_config, cfg.sidecar_point_stage_names, len(dit.sidecar_stages)
+        )
+        factories["sidecar_stages"] = lambda: torch.nn.ModuleList(
+            LocalJointActionStage(
+                dit.inner_dim,
+                dim,
+                cfg.sidecar_hidden_dim,
+                cfg.sidecar_num_heads,
+                cfg.sidecar_local_patch_size,
+                cfg.sidecar_window_chunk_size,
+            )
+            for dim in dimensions
+        )
+
     for name, factory in factories.items():
         prefix = (
             ("action_head." if name == "temporal_fusion" else "action_head.model.") + name + "."

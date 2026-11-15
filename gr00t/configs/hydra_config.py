@@ -26,6 +26,7 @@ from gr00t.data.types import (
 # Only fields that setup.py actually applies to pretrained models are exposed.
 MODEL_FIELDS = frozenset(
     """
+    sidecar_variant sidecar_point_stage_names sidecar_local_patch_size sidecar_window_chunk_size
     sidecar_num_stages sidecar_stage_indices sidecar_hidden_dim sidecar_num_heads
     sidecar_num_point_tokens tactile_fusion_mode contact_num_tokens contact_hidden_dim
     contact_prediction_loss_weight freeze_pretrained_dit freeze_contact_teacher
@@ -411,6 +412,9 @@ def validate_compatibility(config: Config, hardware: dict) -> None:
         raise ValueError("Each dataset mix_ratio must be positive")
     if m.point_encoder_grid_size <= 0:
         raise ValueError("model.point_encoder_grid_size must be positive")
+    from gr00t.configs.sidecar_config import validate_variant
+
+    validate_variant(m)
     if m.dit_type == "sidecar_conditioned_dit":
         if m.dit_training_mode not in {"frozen", "lora", "full"}:
             raise ValueError("dit_training.mode must be frozen, lora or full")
@@ -583,6 +587,13 @@ def preflight(cfg: DictConfig, config: Config) -> dict[str, Any]:
             "point_backbone": t.resolved_point_encoder_learning_rate,
             "tactile_backbone": t.resolved_tactile_encoder_learning_rate,
         },
+        "sidecar": {
+            "variant": m.sidecar_variant,
+            "point_stages": m.sidecar_point_stage_names,
+            "dit_blocks": m.sidecar_stage_indices,
+            "patch_size": m.sidecar_local_patch_size,
+            "window_chunk_size": m.sidecar_window_chunk_size,
+        },
         "conditioning": {
             "dit": m.dit_type,
             "point": m.use_point_conditioning,
@@ -608,6 +619,9 @@ def inherit_checkpoint_architecture(cfg: DictConfig, config: Config, checkpoint)
     dit = getattr(checkpoint, "dit_type", "alternate_vl_dit")
     if dit not in {"alternate_vl_dit", "multimodal_conditioned_dit", "sidecar_conditioned_dit"}:
         raise ValueError(f"Incompatible checkpoint DiT architecture: {dit!r}")
+    from gr00t.configs.sidecar_config import validate_checkpoint_variant
+
+    validate_checkpoint_variant(checkpoint, config.model)
     if dit in {"multimodal_conditioned_dit", "sidecar_conditioned_dit"}:
         if config.model.dit_type != dit:
             raise ValueError("Cannot remove conditioning from a multimodal checkpoint")

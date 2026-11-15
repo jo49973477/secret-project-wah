@@ -102,6 +102,10 @@ class Gr00tN1d7Config(PretrainedConfig):
     dit_type: str = (
         "alternate_vl_dit"  # candidates : ["alternate_vl_dit", "multimodal_conditioned_dit", "dit"]
     )
+    sidecar_variant: str = "legacy"
+    sidecar_point_stage_names: list[str] | None = None
+    sidecar_local_patch_size: int = 64
+    sidecar_window_chunk_size: int = 16
     sidecar_num_stages: int = 4
     sidecar_stage_indices: list[int] | None = None
     sidecar_hidden_dim: int = 256

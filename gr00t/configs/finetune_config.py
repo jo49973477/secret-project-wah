@@ -51,6 +51,10 @@ class FinetuneConfig:
     dit_type: str = "alternate_vl_dit"
     """Action-head DiT implementation; use multimodal_conditioned_dit for sensor inputs."""
 
+    sidecar_variant: str = "legacy"
+    sidecar_point_stage_names: list[str] | None = None
+    sidecar_local_patch_size: int = 64
+    sidecar_window_chunk_size: int = 16
     sidecar_num_stages: int = 4
     sidecar_stage_indices: list[int] | None = None
     sidecar_hidden_dim: int = 256

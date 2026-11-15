@@ -74,7 +74,9 @@ def validate_wah_restoration(model: Any, loading_info: dict[str, Any]) -> None:
     if getattr(config, "dit_type", None) != "sidecar_conditioned_dit":
         return
     names = set(model.state_dict())
-    required = ("action_head.model.sidecar_stages", "action_head.model.sidecar_pool")
+    required = ("action_head.model.sidecar_stages",)
+    if getattr(config, "sidecar_variant", "legacy") == "legacy":
+        required += ("action_head.model.sidecar_pool",)
     for prefix in required:
         if not any(name.startswith(prefix) for name in names):
             raise RuntimeError(f"Sidecar checkpoint model has no {prefix} weights.")
@@ -253,6 +255,7 @@ class Gr00tPolicy(BasePolicy):
 
     def get_model_info(self) -> dict[str, Any]:
         config = self.model.config
+        dit = getattr(getattr(self.model, "action_head", None), "model", None)
         modalities = {
             name: {
                 "modality_keys": list(value.modality_keys),
@@ -276,6 +279,9 @@ class Gr00tPolicy(BasePolicy):
             "dit_training_mode": getattr(config, "dit_training_mode", "unknown"),
             "dit_lora_enabled": getattr(config, "dit_training_mode", None) == "lora",
             "sidecar_type": sidecar,
+            "sidecar_variant": getattr(config, "sidecar_variant", "legacy"),
+            "sidecar_point_stage_names": getattr(config, "sidecar_point_stage_names", None),
+            "sidecar_dit_block_indices": list(getattr(dit, "stage_indices", [])),
             "temporal_window_size": getattr(config, "temporal_window_size", 0),
             "required_modalities": list(modalities),
             "modality_configs": modalities,

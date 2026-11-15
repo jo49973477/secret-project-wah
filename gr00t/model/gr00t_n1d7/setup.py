@@ -238,6 +238,9 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     + " -> "
                     + requested_dit_type
                 )
+            from gr00t.model.extension.multilevel_local_sidecar import validate_checkpoint_variant
+
+            validate_checkpoint_variant(checkpoint_config, self.config.model)
             if checkpoint_dit_type == "sidecar_conditioned_dit":
                 for field in (
                     "sidecar_num_stages",
@@ -331,6 +334,10 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                         use_flash_attention=self.config.model.use_flash_attention,
                         transformers_loading_kwargs=self.transformers_loading_kwargs,
                         dit_type=self.config.model.dit_type,
+                        sidecar_variant=self.config.model.sidecar_variant,
+                        sidecar_point_stage_names=self.config.model.sidecar_point_stage_names,
+                        sidecar_local_patch_size=self.config.model.sidecar_local_patch_size,
+                        sidecar_window_chunk_size=self.config.model.sidecar_window_chunk_size,
                         sidecar_num_stages=self.config.model.sidecar_num_stages,
                         sidecar_stage_indices=self.config.model.sidecar_stage_indices,
                         sidecar_hidden_dim=self.config.model.sidecar_hidden_dim,
@@ -538,6 +545,22 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 "skip_weight_loading": skip_weight_loading,
                 "checkpoint": str(self.config.training.start_from_checkpoint),
                 "reason": "Constructed without pretrained weight loading",
+            }
+
+        if model.config.dit_type == "sidecar_conditioned_dit":
+            dit = model.action_head.model
+            model.pretrained_loading_report["sidecar"] = {
+                "variant": model.config.sidecar_variant,
+                "point_stage_names": model.config.sidecar_point_stage_names,
+                "dit_block_indices": list(dit.stage_indices),
+                "concerto_enc_mode": (model.config.point_encoder_model_config or {}).get(
+                    "enc_mode"
+                ),
+                "concerto_enc_channels": (model.config.point_encoder_model_config or {}).get(
+                    "enc_channels"
+                ),
+                "local_patch_size": model.config.sidecar_local_patch_size,
+                "window_chunk_size": model.config.sidecar_window_chunk_size,
             }
 
         logging.debug(f"Model Config: {model.config}")

@@ -343,6 +343,32 @@ overall, task, action, phase, elapsed, and ETA fields and no ANSI escapes. Full
 Isaac diagnostics remain in `logs/rollout.log` and per-task logs; server
 diagnostics remain in `logs/server.log`. `summary.json` stays authoritative.
 
+### Point-only Sidecar smoke rollout
+
+For a checkpoint trained with `use_point_conditioning=true`,
+`use_tactile_conditioning=false`, `tactile_fusion_mode=none`,
+`contact_input_mode=none`, `temporal_window_size=0`, and `dit_training_mode=full`:
+
+```bash
+CHECKPOINT=/path/to/point-only-sidecar-checkpoint
+bash scripts/run_gr00t_univtac_local.sh \
+  --checkpoint "$CHECKPOINT" --policy auto \
+  --sensor-contract /path/to/training-dataset/meta/modality.json \
+  --model-python .venv/bin/python --model-device cuda:0 --sim-device cuda:0 \
+  --mode smoke --episodes-per-task 1 --tasks lift_can --execution-horizon 1 \
+  --output-dir "$OUT"
+```
+
+The checkpoint processor must declare `pointcloud.scene` without `tactile.rgb`.
+The training sensor contract must contain scene preprocessing metadata; tactile
+metadata is optional and ignored for this checkpoint. The worker requests aligned
+head/wrist RGB-D and uses verified live camera calibration and metric depth.
+It requests no tactile observation streams and sends no tactile tensors. Missing
+depth or calibration still fails explicitly. A single scene timestamp needs no
+history window or `temporal_valid` mask. Normalization and action execution use
+the existing inference path. This example requires Isaac and has not been run by
+the CPU regression suite.
+
 ### WAH Temporal and MoE smoke rollouts
 
 For either launcher, choose a complete checkpoint for the desired Temporal or

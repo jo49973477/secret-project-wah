@@ -68,6 +68,30 @@ class Gr00tN1d7ActionHead(nn.Module):
         super().__init__()
         self.config = config
         self._dtype_diagnostics_logged = False
+        from gr00t.model.extension.multilevel_local_sidecar import (
+            resolve_point_stages,
+            validate_variant,
+        )
+
+        validate_variant(config)
+        point_stage_dims = None
+        if config.sidecar_variant == "multilevel_local":
+            if config.point_encoder_model_config is None:
+                config.point_encoder_model_config = ConcertoPointEncoder.read_architecture_config(
+                    model_name=config.point_encoder_cfg,
+                    checkpoint_path=config.point_encoder_checkpoint_path,
+                    repo_id=config.point_encoder_repo_id,
+                    download_root=config.point_encoder_download_root,
+                    enable_flash=config.point_encoder_enable_flash,
+                )
+            count = (
+                len(config.sidecar_stage_indices)
+                if config.sidecar_stage_indices is not None
+                else min(config.sidecar_num_stages, config.diffusion_model_cfg["num_layers"])
+            )
+            config.sidecar_point_stage_names, point_stage_dims = resolve_point_stages(
+                config.point_encoder_model_config, config.sidecar_point_stage_names, count
+            )
         self.hidden_size = config.hidden_size
         self.input_embedding_dim = config.input_embedding_dim
 
@@ -116,6 +140,11 @@ class Gr00tN1d7ActionHead(nn.Module):
                 **config.diffusion_model_cfg,
                 cross_attention_dim=config.backbone_embedding_dim,
                 attend_text_every_n_blocks=config.attend_text_every_n_blocks,
+                sidecar_variant=config.sidecar_variant,
+                sidecar_point_stage_names=config.sidecar_point_stage_names,
+                sidecar_point_stage_dims=point_stage_dims,
+                sidecar_local_patch_size=config.sidecar_local_patch_size,
+                sidecar_window_chunk_size=config.sidecar_window_chunk_size,
                 sidecar_num_stages=config.sidecar_num_stages,
                 sidecar_stage_indices=config.sidecar_stage_indices,
                 sidecar_hidden_dim=config.sidecar_hidden_dim,
@@ -218,6 +247,9 @@ class Gr00tN1d7ActionHead(nn.Module):
                 if isinstance(self.tactile_encoder, SparshDinoTactileEncoder):
                     config.tactile_pretrained_load_on_init = False
 
+        if config.sidecar_variant == "multilevel_local" and self.point_encoder is not None:
+            self.point_encoder.validate_stage_mapping(config.sidecar_point_stage_names)
+
         self.temporal_fusion = None
         self._temporal_ring = None
         if config.temporal_window_size:
@@ -294,6 +326,8 @@ class Gr00tN1d7ActionHead(nn.Module):
             config.point_encoder_model_config = dict(self.point_encoder.architecture_config)
             config.point_encoder_pretrained_load_on_init = False
             config.point_encoder_deferred_bootstrap = False
+            if config.sidecar_variant == "multilevel_local":
+                self.point_encoder.validate_stage_mapping(config.sidecar_point_stage_names)
 
         if config.tactile_encoder_deferred_bootstrap:
             if self.tactile_encoder is not None:
@@ -396,7 +430,7 @@ class Gr00tN1d7ActionHead(nn.Module):
             if isinstance(self.point_encoder, ConcertoPointEncoder):
                 self.point_encoder.set_trainable(
                     backbone=tune_point_encoder,
-                    projection=tune_multimodal_adapter,
+                    projection=tune_multimodal_adapter and self.config.sidecar_variant == "legacy",
                 )
             else:
                 # Preserve historical all-or-nothing freezing for PointNet++
@@ -653,10 +687,15 @@ class Gr00tN1d7ActionHead(nn.Module):
         if self.point_encoder is not None:
             if "points" not in action_input:
                 raise KeyError("Point conditioning is enabled but action_input.points is missing")
-            point_tokens, point_attention_mask = self.point_encoder(
-                action_input.points,
-                return_mask=True,
-            )
+            if self.config.sidecar_variant == "multilevel_local":
+                point_tokens = self.point_encoder.forward_multilevel(
+                    action_input.points, stage_names=self.config.sidecar_point_stage_names
+                )
+            else:
+                point_tokens, point_attention_mask = self.point_encoder(
+                    action_input.points,
+                    return_mask=True,
+                )
 
         tactile_tokens = None
         if self.tactile_encoder is not None and not (
@@ -1198,6 +1237,32 @@ class Gr00tN1d7(PreTrainedModel):
 
     config_class = Gr00tN1d7Config
     supports_gradient_checkpointing = True
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        supplied = kwargs.get("config")
+        if supplied is not None or "sidecar_variant" in kwargs:
+            from copy import deepcopy
+
+            from gr00t.model.extension.multilevel_local_sidecar import validate_checkpoint_variant
+
+            loading = {
+                k: kwargs[k]
+                for k in ("cache_dir", "revision", "local_files_only", "token", "subfolder")
+                if k in kwargs
+            }
+            original = Gr00tN1d7Config.from_pretrained(pretrained_model_name_or_path, **loading)
+            requested = deepcopy(supplied if supplied is not None else original)
+            for key in (
+                "sidecar_variant",
+                "sidecar_point_stage_names",
+                "sidecar_local_patch_size",
+                "sidecar_window_chunk_size",
+            ):
+                if key in kwargs:
+                    setattr(requested, key, kwargs[key])
+            validate_checkpoint_variant(original, requested)
+        return super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
 
     def __init__(
         self,

@@ -138,6 +138,10 @@ if __name__ == "__main__":
     config.model.tune_vlln = ft_config.tune_vlln
     config.model.tune_point_encoder = ft_config.tune_point_encoder
     config.model.tune_tactile_encoder = ft_config.tune_tactile_encoder
+    config.model.sidecar_variant = ft_config.sidecar_variant
+    config.model.sidecar_point_stage_names = ft_config.sidecar_point_stage_names
+    config.model.sidecar_local_patch_size = ft_config.sidecar_local_patch_size
+    config.model.sidecar_window_chunk_size = ft_config.sidecar_window_chunk_size
     config.model.sidecar_num_stages = ft_config.sidecar_num_stages
     config.model.sidecar_stage_indices = ft_config.sidecar_stage_indices
     config.model.sidecar_hidden_dim = ft_config.sidecar_hidden_dim

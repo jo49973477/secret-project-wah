@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+- wah_multilevel_local_frozen
+- _self_
+name: wah_multilevel_local_full
+dit_training:
+  mode: full
+model:
+  tune_diffusion_model: true
+  freeze_pretrained_dit: false

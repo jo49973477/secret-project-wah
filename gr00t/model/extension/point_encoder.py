@@ -777,6 +777,81 @@ class ConcertoPointEncoder(nn.Module):
         del checkpoint
         return model, output_dim, checkpoint_name, parameter_count, config
 
+    @staticmethod
+    def read_architecture_config(
+        *,
+        model_name,
+        checkpoint_path=None,
+        repo_id="Pointcept/Concerto",
+        download_root=None,
+        enable_flash=None,
+    ):
+        """Read actual checkpoint metadata without constructing a second backbone."""
+        from pathlib import Path
+
+        from gr00t.utils.checkpoint_io import load_torch_checkpoint
+
+        if checkpoint_path:
+            path = Path(checkpoint_path).expanduser()
+        else:
+            from huggingface_hub import hf_hub_download
+
+            path = hf_hub_download(
+                repo_id=repo_id,
+                filename=f"{model_name}.pth",
+                repo_type="model",
+                revision="main",
+                local_dir=download_root or os.path.expanduser("~/.cache/concerto/ckpt"),
+            )
+        checkpoint = load_torch_checkpoint(path, weights_only=True)
+        config = dict(checkpoint["config"])
+        if enable_flash is not None:
+            config["enable_flash"] = enable_flash
+        ConcertoPointEncoder._output_dim_from_config(config)
+        return config
+
+    def validate_stage_mapping(self, names):
+        from gr00t.model.extension.multilevel_local_sidecar import resolve_point_stages
+
+        names, dimensions = resolve_point_stages(self.architecture_config, names, len(names))
+        encoder = getattr(self.backbone, "enc", None)
+        modules = dict(encoder.named_children()) if encoder is not None else {}
+        if any(name not in modules for name in names):
+            raise ValueError(
+                f"Concerto encoder modules {list(modules)} do not contain stages {names}"
+            )
+        return names, dimensions
+
+    def forward_multilevel(self, points, point_mask=None, *, stage_names):
+        """Extract stage boundaries in one backbone forward, preserving gradients.
+
+        Decoder unpooling can mutate parent Point objects. Snapshot only the
+        selected tensor fields at each boundary; never retain Point objects.
+        Hooks are scoped to this call and are removed even on an exception.
+        """
+        from gr00t.model.extension.multilevel_local_sidecar import snapshot_level
+
+        names, dimensions = self.validate_stage_mapping(stage_names)
+        levels, handles = {}, []
+
+        def capture(name, dim):
+            def hook(module, args, output):
+                levels[name] = snapshot_level(output, dim)
+
+            return hook
+
+        try:
+            modules = dict(self.backbone.enc.named_children())
+            for name, dim in zip(names, dimensions):
+                handles.append(modules[name].register_forward_hook(capture(name, dim)))
+            self.forward(points, point_mask)
+        finally:
+            for handle in handles:
+                handle.remove()
+        if set(levels) != set(names):
+            raise RuntimeError(f"Concerto did not emit all requested encoder stages: {names}")
+        return {name: levels[name] for name in names}
+
     def backbone_parameters(self):
         """Return only pretrained backbone parameters for optimizer LR grouping."""
         return self.backbone.parameters()

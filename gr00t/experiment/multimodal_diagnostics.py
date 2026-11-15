@@ -174,7 +174,12 @@ class MultimodalDiagnostics(TrainerCallback):
         optimizer = self._zero_optimizer or self.trainer.optimizer
         scale = float(getattr(optimizer, "loss_scale", 1.0))
         for label, attribute in (("point", "point_gate"), ("action", "action_gate")):
-            gates = [getattr(s, attribute) for s in self.dit.sidecar_stages]
+            gates = [
+                getattr(s, attribute) for s in self.dit.sidecar_stages if hasattr(s, attribute)
+            ]
+            if not gates:
+                self.record[f"sidecar_{label}_gate_mean_abs"] = None
+                continue
             values = [full_value(g) for g in gates]
             self.record[f"sidecar_{label}_gate_mean_abs"] = sum(
                 float(v.abs().mean()) for v in values if v is not None
@@ -191,6 +196,24 @@ class MultimodalDiagnostics(TrainerCallback):
             self.record[f"sidecar_{label}_gate_grad_norm"] = gradient_stats(gates, scale)[
                 "grad_norm"
             ]
+        if getattr(self.dit, "sidecar_variant", "legacy") == "multilevel_local":
+            self.record["sidecar_stage_mapping"] = [
+                dict(stage=i, point_stage=name, dit_block=block, **module.last_diagnostics)
+                for i, (name, block, module) in enumerate(
+                    zip(
+                        self.dit.sidecar_point_stage_names,
+                        self.dit.stage_indices,
+                        self.dit.sidecar_stages,
+                    )
+                )
+            ]
+            for i, module in enumerate(self.dit.sidecar_stages):
+                for key, value in module.last_diagnostics.items():
+                    if isinstance(value, (float, int)):
+                        self.record[f"sidecar_local/{key}_stage_{i}"] = value
+                    elif key in {"point_counts", "window_counts"}:
+                        self.record[f"sidecar_local/{key}_stage_{i}"] = sum(value)
+
         head = self.trainer.model.action_head
         groups = {
             "sidecar": list(self.dit.sidecar_stages.parameters())
@@ -210,7 +233,8 @@ class MultimodalDiagnostics(TrainerCallback):
             "gates": [
                 g
                 for stage in self.dit.sidecar_stages
-                for g in (stage.point_gate, stage.action_gate)
+                for g in (getattr(stage, "point_gate", None), stage.action_gate)
+                if g is not None
             ]
             + [module.scale for module in self.dit.contact_injections],
             "dit": [p for _, p in original_dit_parameters(self.dit)],

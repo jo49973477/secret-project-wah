@@ -70,7 +70,12 @@ class Gr00tUniVTACPolicy:
                         f"({self.model_info.get('checkpoint_path')})."
                     )
             contract = (
-                add_scene_calibration(load_sensor_contract(sensor_contract), scene_calibration)
+                add_scene_calibration(
+                    load_sensor_contract(
+                        sensor_contract, require_tactile="tactile" in self.modality_configs
+                    ),
+                    scene_calibration,
+                )
                 if self.policy_type == "wah"
                 else None
             )
