@@ -806,7 +806,9 @@ def _run(
             sensor_contract=args.sensor_contract,
             scene_calibration=args.scene_calibration,
         )
-        if policy.policy_type == "wah":
+        needs_pointcloud = "pointcloud" in policy.modality_configs
+        needs_tactile = "tactile" in policy.modality_configs
+        if needs_pointcloud:
             camera_types = env_cfg.obs_data_type.setdefault("camera", [])
             if "depth" not in camera_types:
                 camera_types.append("depth")
@@ -839,7 +841,8 @@ def _run(
             sensor_adapter = UniVTACSensorAdapter(
                 task,
                 policy.history.sensor_contract,
-                require_tactile="tactile" in policy.modality_configs,
+                require_pointcloud=needs_pointcloud,
+                require_tactile=needs_tactile,
             )
             metadata["wah_sensor_adapter"] = sensor_adapter.metadata
             _diagnostic("wah_sensor_adapter", json.dumps(sensor_adapter.metadata, sort_keys=True))
@@ -1114,10 +1117,10 @@ def _run(
                             progress_diagnostics.update(
                                 {
                                     "rgb_available": "video" in formatted,
-                                    "depth_available": sensor_adapter is not None,
+                                    "depth_available": needs_pointcloud,
                                     "pointcloud_valid": "pointcloud" in formatted,
                                     "tactile_available": "tactile" in formatted,
-                                    "sensor_calibrated": sensor_adapter is not None,
+                                    "sensor_calibrated": needs_pointcloud,
                                     "action_chunk_shape": list(action_chunk.shape),
                                     "action_chunk_horizon": len(action_chunk),
                                     "temporal_history_frames": len(policy.history.frames),

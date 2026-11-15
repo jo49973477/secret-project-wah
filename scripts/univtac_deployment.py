@@ -152,7 +152,22 @@ def probe(
             f"{info['checkpoint_identity']} ({info.get('checkpoint_path')})."
         )
     info["policy_type"] = validate_contract(configs, horizon, policy)
+    info["sensor_modalities"] = sorted(
+        modality for modality in ("pointcloud", "tactile") if modality in configs
+    )
     return info
+
+
+def _load_checkpoint_sensor_contract(info: dict, path: str | Path | None) -> dict | None:
+    """Validate the launcher's contract against only checkpoint-declared sensors."""
+    if info["policy_type"] != "wah":
+        return None
+    sensor_modalities = set(info["sensor_modalities"])
+    return load_sensor_contract(
+        path,
+        require_pointcloud="pointcloud" in sensor_modalities,
+        require_tactile="tactile" in sensor_modalities,
+    )
 
 
 def wait_ready(args: argparse.Namespace, server: subprocess.Popen | None) -> dict:
@@ -645,8 +660,7 @@ def run(args: argparse.Namespace, passthrough: list[str]) -> int:
                 print((logs / "server.log").read_text(encoding="utf-8"), file=sys.stderr)
             raise
         memory["after_model_load"] = gpu_memory()
-        if info["policy_type"] == "wah":
-            load_sensor_contract(args.sensor_contract)
+        _load_checkpoint_sensor_contract(info, args.sensor_contract)
         if args.deployment == "local" and memory["before_launch"] and memory["after_model_load"]:
             before = {row["index"]: row for row in memory["before_launch"]}
             for row in memory["after_model_load"]:

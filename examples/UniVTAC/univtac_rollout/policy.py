@@ -70,15 +70,16 @@ class Gr00tUniVTACPolicy:
                         f"({self.model_info.get('checkpoint_path')})."
                     )
             contract = (
-                add_scene_calibration(
-                    load_sensor_contract(
-                        sensor_contract, require_tactile="tactile" in self.modality_configs
-                    ),
-                    scene_calibration,
+                load_sensor_contract(
+                    sensor_contract,
+                    require_pointcloud="pointcloud" in self.modality_configs,
+                    require_tactile="tactile" in self.modality_configs,
                 )
                 if self.policy_type == "wah"
                 else None
             )
+            if contract is not None and "pointcloud" in self.modality_configs:
+                contract = add_scene_calibration(contract, scene_calibration)
             self.history = ObservationHistory(self.modality_configs, contract)
             self._latest_formatted = None
             if self.log_level == "debug":

@@ -343,6 +343,26 @@ overall, task, action, phase, elapsed, and ETA fields and no ANSI escapes. Full
 Isaac diagnostics remain in `logs/rollout.log` and per-task logs; server
 diagnostics remain in `logs/server.log`. `summary.json` stays authoritative.
 
+### Checkpoint-driven sensor modes
+
+The rollout reads the processor modality configuration served with the loaded
+checkpoint; `--policy auto` does not infer sensors from the task YAML. Supported
+contracts are:
+
+| Checkpoint modalities | Runtime sensors |
+| --- | --- |
+| RGB baseline | Head/wrist RGB only; no sensor contract |
+| `pointcloud.scene` | Head/wrist aligned RGB-D plus live calibration; no tactile sensor |
+| `pointcloud.scene` + `tactile.rgb` | Calibrated head/wrist RGB-D plus the exact trained tactile stream |
+| `tactile.rgb` | The exact trained tactile stream; no RGB-D calibration initialization |
+
+The last mode is supported when the checkpoint architecture and processor agree
+on tactile-only conditioning. Architecture/processor compatibility is validated
+by the inference server. The sensor contract is validated only for modalities
+declared by that checkpoint: scene metadata is required for PointCloud, and the
+tactile source key is required for tactile. Extra task-config streams are removed
+rather than sent as untrained inputs.
+
 ### Point-only Sidecar smoke rollout
 
 For a checkpoint trained with `use_point_conditioning=true`,
@@ -401,15 +421,17 @@ bash scripts/run_gr00t_univtac_split.sh \
 ```
 
 The sensor contract is the exact `meta/modality.json` produced alongside the
-training dataset. It supplies scene point count, voxel size, workspace crop,
-sampling seed, coordinate frame, and the tactile training source key. The
+training dataset. For the modalities active in the checkpoint, it supplies the
+scene point count, voxel size, workspace crop, sampling seed, coordinate frame,
+and/or the tactile training source key. The
 optional scene calibration JSON follows the converter's `cameras.head` and
 `cameras.wrist` schema: pinhole `intrinsics`, `depth_scale` to metres, static
 head `T_base_camera`, and wrist `T_ee_camera`. The wrist transform is composed
 with the current `embodiment.ee` pose. A per-frame `T_base_camera` supplied by
 UniVTAC overrides calibration. The simulator must provide actual aligned head
-and wrist depth; the adapter will not invent point clouds. If the training
-source is `tactile/.../rgb`, the simulator must expose actual `tactile.rgb`.
+and wrist depth whenever PointCloud is active; the adapter will not invent point
+clouds. RGB-D calibration is not initialized for tactile-only checkpoints. If
+the training source is `tactile/.../rgb`, the simulator must expose actual `tactile.rgb`.
 If it exposes only `rgb_marker`, use a checkpoint trained from that stream or
 collect the required raw tactile stream. Camera RGB cannot replace tactile.
 

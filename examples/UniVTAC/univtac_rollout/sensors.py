@@ -122,19 +122,33 @@ def _tactile_runtime_mapping(task: Any, source_key: str) -> tuple[str, str]:
 
 
 class UniVTACSensorAdapter:
-    """Attach live RGB-D calibration and the exact training tactile stream to observations."""
+    """Attach only the live sensor metadata and streams required by the checkpoint."""
 
-    def __init__(self, task: Any, sensor_contract: dict[str, Any], *, require_tactile: bool = True):
+    def __init__(
+        self,
+        task: Any,
+        sensor_contract: dict[str, Any],
+        *,
+        require_pointcloud: bool = True,
+        require_tactile: bool = True,
+    ):
+        if not require_pointcloud and not require_tactile:
+            raise ValueError("UniVTACSensorAdapter needs an active sensor modality.")
+        self.require_pointcloud = require_pointcloud
         self.require_tactile = require_tactile
         self.task = task
-        manager = getattr(task, "_camera_manager", None)
-        self.cameras = getattr(manager, "cameras", None)
-        if not isinstance(self.cameras, dict) or set(self.cameras) != {"head", "wrist"}:
-            raise RuntimeError(
-                "WAH needs live UniVTAC head and wrist camera objects; found "
-                f"{sorted(self.cameras) if isinstance(self.cameras, dict) else None}."
-            )
-        self.depth_scale = _isaac_depth_scale_to_meters()
+        self.cameras: dict[str, Any] = {}
+        self.depth_scale: float | None = None
+        if require_pointcloud:
+            manager = getattr(task, "_camera_manager", None)
+            cameras = getattr(manager, "cameras", None)
+            if not isinstance(cameras, dict) or set(cameras) != {"head", "wrist"}:
+                raise RuntimeError(
+                    "PointCloud rollout needs live UniVTAC head and wrist camera objects; found "
+                    f"{sorted(cameras) if isinstance(cameras, dict) else None}."
+                )
+            self.cameras = cameras
+            self.depth_scale = _isaac_depth_scale_to_meters()
         if require_tactile:
             source_key = sensor_contract["tactile"]["rgb"]["source_key"]
             self.tactile_source_key = source_key
@@ -146,18 +160,20 @@ class UniVTACSensorAdapter:
             )
         self._tactile_diagnostic_logged = False
         self._head_transform: np.ndarray | None = None
-        self.metadata = {
-            "depth_units": "m",
-            "depth_scale": self.depth_scale,
-            "depth_semantics": "distance_to_image_plane",
-            "camera_frame": OPTICAL_FRAME_CONVENTION,
-            "base_frame_source": "live articulation root-link pose",
-            "camera_pose_source": "live TiledCamera.data.pos_w + quat_w_ros",
-            "camera_prim_paths": {
-                name: str(getattr(getattr(camera, "cfg", None), "prim_path", ""))
-                for name, camera in self.cameras.items()
-            },
-        }
+        self.metadata: dict[str, Any] = {}
+        if require_pointcloud:
+            self.metadata.update(
+                depth_units="m",
+                depth_scale=self.depth_scale,
+                depth_semantics="distance_to_image_plane",
+                camera_frame=OPTICAL_FRAME_CONVENTION,
+                base_frame_source="live articulation root-link pose",
+                camera_pose_source="live TiledCamera.data.pos_w + quat_w_ros",
+                camera_prim_paths={
+                    name: str(getattr(getattr(camera, "cfg", None), "prim_path", ""))
+                    for name, camera in self.cameras.items()
+                },
+            )
 
         if require_tactile:
             self.metadata.update(
@@ -220,38 +236,42 @@ class UniVTACSensorAdapter:
         }
 
     def attach(self, observation: dict[str, Any]) -> dict[str, Any]:
-        sensors = observation.get("observation")
-        if not isinstance(sensors, dict):
-            raise ValueError("UniVTAC observation is missing its observation sensor mapping.")
-        transform_world_base = self._base_transform()
-        calibrations = {}
-        for name in ("head", "wrist"):
-            sensor = sensors.get(name)
-            if not isinstance(sensor, dict) or "rgb" not in sensor or "depth" not in sensor:
-                raise ValueError(
-                    f"Live UniVTAC {name} observation must contain aligned RGB and depth."
-                )
-            calibration = self._camera_calibration(name, transform_world_base)
-            sensor.update(calibration)
-            calibrations[name] = calibration
-            rgb = _to_numpy(sensor["rgb"], name=f"{name} RGB")
-            depth = _to_numpy(sensor["depth"], name=f"{name} depth")
-            if depth.ndim == 3 and depth.shape[-1] == 1:
-                depth = depth[..., 0]
-            if rgb.ndim != 3 or rgb.shape[-1] != 3 or depth.shape != rgb.shape[:2]:
-                raise ValueError(
-                    f"Live {name} RGB-D is not pixel aligned: rgb={rgb.shape}, depth={depth.shape}."
-                )
+        if self.require_pointcloud:
+            sensors = observation.get("observation")
+            if not isinstance(sensors, dict):
+                raise ValueError("UniVTAC observation is missing its observation sensor mapping.")
+            transform_world_base = self._base_transform()
+            calibrations = {}
+            for name in ("head", "wrist"):
+                sensor = sensors.get(name)
+                if not isinstance(sensor, dict) or "rgb" not in sensor or "depth" not in sensor:
+                    raise ValueError(
+                        f"Live UniVTAC {name} observation must contain aligned RGB and depth."
+                    )
+                calibration = self._camera_calibration(name, transform_world_base)
+                sensor.update(calibration)
+                calibrations[name] = calibration
+                rgb = _to_numpy(sensor["rgb"], name=f"{name} RGB")
+                depth = _to_numpy(sensor["depth"], name=f"{name} depth")
+                if depth.ndim == 3 and depth.shape[-1] == 1:
+                    depth = depth[..., 0]
+                if rgb.ndim != 3 or rgb.shape[-1] != 3 or depth.shape != rgb.shape[:2]:
+                    raise ValueError(
+                        f"Live {name} RGB-D is not pixel aligned: "
+                        f"rgb={rgb.shape}, depth={depth.shape}."
+                    )
 
-        if "head_intrinsics" not in self.metadata:
-            self.metadata.update(
-                {
-                    "head_intrinsics": calibrations["head"]["intrinsics"].tolist(),
-                    "head_T_base_camera": calibrations["head"]["T_base_camera"].tolist(),
-                    "wrist_intrinsics": calibrations["wrist"]["intrinsics"].tolist(),
-                }
-            )
-        self.metadata["last_wrist_T_base_camera"] = calibrations["wrist"]["T_base_camera"].tolist()
+            if "head_intrinsics" not in self.metadata:
+                self.metadata.update(
+                    {
+                        "head_intrinsics": calibrations["head"]["intrinsics"].tolist(),
+                        "head_T_base_camera": calibrations["head"]["T_base_camera"].tolist(),
+                        "wrist_intrinsics": calibrations["wrist"]["intrinsics"].tolist(),
+                    }
+                )
+            self.metadata["last_wrist_T_base_camera"] = calibrations["wrist"][
+                "T_base_camera"
+            ].tolist()
 
         if not self.require_tactile:
             return observation
