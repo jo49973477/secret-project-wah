@@ -100,26 +100,41 @@ architecture does not restore absolute translations removed by CenterShift.
 
 Run from the repository root in the existing environment. These commands start
 training only when explicitly executed by the operator. Defaults match the existing
-Florence non-temporal overfit-five-episode conditions; no training was launched
-as part of implementation. The default hardware preset is four BF16 ZeRO-3 GPUs.
+Florence full-dataset, non-temporal conditions; no training was launched as part
+of implementation. The dataset defaults to `data/univtac` and can be selected with
+`FLORENCE_DATASET`. It must be an existing converted UniVTAC dataset; the launcher
+does not create it or fall back to the five-episode overfit subset. The default
+hardware preset is four BF16 ZeRO-3 GPUs and the default training length is 10,000
+steps.
 
 ```bash
 # Read-only config composition/preflight; no model weights or dataset are loaded.
 .venv/bin/python scripts/train_hydra.py \
   --config-name experiment/wah_multilevel_local_frozen dry_run=true
 
-# Supply existing original NVIDIA GR00T and official Concerto checkpoints and
-# the converted independent five-episode UniVTAC subset.
-FLORENCE_CONCERTO_CHECKPOINT=/path/to/concerto_small.pth \
-FLORENCE_OVERFIT_DATASET=/path/to/univtac_overfit5 \
-.venv/bin/python scripts/train_hydra.py \
-  --config-name experiment/wah_multilevel_local_frozen \
-  model.base_model_path=/path/to/original_GR00T_N1.7
+# Full UniVTAC training. The Concerto checkpoint may be supplied with
+# FLORENCE_CONCERTO_CHECKPOINT or resolved by the existing loader.
+export FLORENCE_DATASET=/path/to/full_univtac_dataset
+
+CUDA_VISIBLE_DEVICES=0,1 \
+uv run --no-sync python scripts/train_hydra.py \
+  --config-name experiment/wah_multilevel_local_full \
+  hardware=dual_3090_zero3 \
+  trainctl.enabled=true \
+  trainctl.message_mode=koyori \
+  training.max_steps=10000
 
 # Replace the config name for the other two modes:
+# experiment/wah_multilevel_local_frozen
 # experiment/wah_multilevel_local_lora
-# experiment/wah_multilevel_local_full
 ```
+
+All three configs use the same full dataset and do not set
+`data.expected_episode_ids`. `frozen` keeps the pretrained DiT frozen, `lora`
+adds LoRA to the existing DiT attention modules, and `full` trains the original
+DiT parameters. Here, **`full` means DiT full fine-tuning; it does not mean a
+different dataset size**. `FLORENCE_OVERFIT_DATASET` and
+`data.expected_episode_ids=null` overrides are not needed.
 
 Hardware, dataset and Trainctl overrides use the existing Hydra launcher. The
 Sidecar remains in the action-head optimizer group. The new local stage projections
@@ -226,8 +241,10 @@ socket sandbox.
 - `gr00t/experiment/{multimodal_diagnostics,sidecar_evaluation,hydra_launch}.py`:
   training/evaluation/offline stage mapping and historical resume defaults.
 - `gr00t/policy/gr00t_policy.py`: variant-aware restoration and inference metadata.
-- `configs/experiment/wah_multilevel_local_{frozen,lora,full}.yaml`: separate
-  experiments, without replacing existing presets.
+- `configs/experiment/wah_multilevel_local_base.yaml`: shared full-UniVTAC,
+  non-temporal Multi-level Local base.
+- `configs/experiment/wah_multilevel_local_{frozen,lora,full}.yaml`: separate DiT
+  training modes inheriting that base, without replacing existing presets.
 - `tests/gr00t/model/test_multilevel_local_sidecar.py`: CPU mock coverage and
   opt-in GPU optimizer smoke. The existing diagnostics README/CLI were extended
   to expose this architecture's stage mapping.

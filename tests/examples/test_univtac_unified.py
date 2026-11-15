@@ -865,7 +865,7 @@ def test_active_modality_contract_and_history(mode, tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["rgb", "point", "tactile", "point_tactile"])
-def test_worker_requests_only_required_tactile_stream(mode):
+def test_worker_requests_policy_and_renderer_tactile_streams(mode):
     from run_closed_loop_worker import _configure_tactile_observations
 
     active = configs()
@@ -880,6 +880,6 @@ def test_worker_requests_only_required_tactile_stream(mode):
     _configure_tactile_observations(streams, active, sensor_contract)
     assert streams["camera"] == ["rgb", "depth"]
     if mode in {"tactile", "point_tactile"}:
-        assert streams["tactile"] == ["rgb"]
+        assert streams["tactile"] == ["rgb", "rgb_marker"]
     else:
-        assert "tactile" not in streams
+        assert streams["tactile"] == ["rgb_marker"]

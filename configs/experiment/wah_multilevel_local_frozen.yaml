@@ -1,15 +1,6 @@
 # @package _global_
-# Same non-temporal point-only Sidecar ablation conditions; new local interaction only.
+# Full-dataset Multi-level Local Sidecar with the pretrained DiT frozen.
 defaults:
-- florence_ablation_base
+- wah_multilevel_local_base
 - _self_
 name: wah_multilevel_local_frozen
-model:
-  sidecar_variant: multilevel_local
-  sidecar_num_stages: 4
-  sidecar_stage_indices: null
-  sidecar_point_stage_names: [enc1, enc2, enc3, enc4]
-  sidecar_local_patch_size: 64
-  sidecar_window_chunk_size: 16
-training:
-  wandb_group: wah-multilevel-local

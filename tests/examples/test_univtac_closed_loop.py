@@ -23,8 +23,11 @@ from run_closed_loop_eval import (  # noqa: E402
 from run_closed_loop_worker import (  # noqa: E402
     _apply_task_config,
     _config_profile,
+    _configure_tactile_observations,
+    _finish_video,
     _isaac_lab_release_matches,
     _validate_mp4,
+    _validate_video_renderer_observation,
     _write_worker_results,
 )
 from univtac_rollout.client import CompatibleMsgSerializer  # noqa: E402
@@ -225,6 +228,54 @@ def test_checkpoint_contract_requires_rgb_schema_and_sufficient_horizon() -> Non
     multimodal["tactile"] = {"delta_indices": [0], "modality_keys": ["rgb"]}
     with pytest.raises(ValueError, match="RGB rollout adapter"):
         validate_rgb_checkpoint_contract(multimodal, execution_horizon=1)
+
+
+def test_tactile_observation_requests_keep_policy_and_renderer_streams_separate() -> None:
+    observations = {"camera": ["rgb"], "tactile": ["depth", "pose"]}
+    _configure_tactile_observations(observations, _modality_configs(), None)
+    assert observations["tactile"] == ["rgb_marker"]
+
+    tactile_modalities = _modality_configs()
+    tactile_modalities["tactile"] = {"delta_indices": [0], "modality_keys": ["rgb"]}
+    contract = {"tactile": {"rgb": {"source_key": "tactile/left_gsmini/rgb"}}}
+    _configure_tactile_observations(observations, tactile_modalities, contract)
+    assert observations["tactile"] == ["rgb", "rgb_marker"]
+
+
+def test_video_cleanup_with_no_frames_preserves_primary_episode_error(tmp_path: Path) -> None:
+    source = tmp_path / "episode_error.mp4"
+    source.touch()
+
+    class FakeTask:
+        save_video_path = tmp_path / "episode.mp4"
+        video_handler = SimpleNamespace(ffmpeg=SimpleNamespace(pid=123, returncode=0))
+
+        def clean_cache(self, *, result: str) -> None:
+            assert result == "error"
+
+    finalized = _finish_video(
+        FakeTask(),
+        monitor={"frames": 0},
+        output_dir=tmp_path,
+        task_name="lift_can",
+        seed=7,
+        success=None,
+        termination_reason="exception",
+    )
+
+    assert finalized is None
+    assert not source.exists()
+
+
+def test_video_renderer_schema_rejects_missing_real_tactile_stream() -> None:
+    observation = _observation()
+    observation["tactile"] = {"left_tactile": {"rgb_marker": np.zeros((16, 16, 3), dtype=np.uint8)}}
+
+    with pytest.raises(ValueError, match="tactile.right_tactile.rgb_marker"):
+        _validate_video_renderer_observation(observation)
+
+    observation["tactile"]["right_tactile"] = {"rgb_marker": np.zeros((16, 16, 3), dtype=np.uint8)}
+    _validate_video_renderer_observation(observation)
 
 
 def test_minimal_serializer_round_trips_requests_and_decodes_msgpack_numpy() -> None:

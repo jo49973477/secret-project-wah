@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-- wah_multilevel_local_frozen
+- wah_multilevel_local_base
 - _self_
 name: wah_multilevel_local_lora
 dit_training:

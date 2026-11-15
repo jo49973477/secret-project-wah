@@ -1,0 +1,16 @@
+# @package _global_
+# Full UniVTAC dataset base for the non-temporal Multi-level Local Sidecar.
+# "full" in a child config refers to DiT full fine-tuning, not dataset size.
+defaults:
+- florence_full_base
+- _self_
+name: wah_multilevel_local
+model:
+  sidecar_variant: multilevel_local
+  sidecar_num_stages: 4
+  sidecar_stage_indices: null
+  sidecar_point_stage_names: [enc1, enc2, enc3, enc4]
+  sidecar_local_patch_size: 64
+  sidecar_window_chunk_size: 16
+training:
+  wandb_group: wah-multilevel-local

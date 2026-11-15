@@ -23,6 +23,7 @@ from gr00t.experiment.hydra_launch import (
     launch,
     resolve_resume,
     validate_checkpoint,
+    validate_dataset_inputs,
     worker_command,
     write_snapshots,
 )
@@ -143,12 +144,84 @@ def test_florence_2x2_full_dataset_experiment_modes(name, family, dit_mode, monk
         assert result.model.temporal_window_size == 5
         assert result.model.contact_input_mode == "none"
         assert result.data.modality_configs["new_embodiment"]["pointcloud"].delta_indices == [
-            -4, -3, -2, -1, 0
+            -4,
+            -3,
+            -2,
+            -1,
+            0,
         ]
     else:
         assert result.model.temporal_window_size == 0
         assert result.model.contact_input_mode == "moe_soft"
         assert result.data.modality_configs["new_embodiment"]["pointcloud"].delta_indices == [0]
+
+
+@pytest.mark.parametrize("mode", ["frozen", "lora", "full"])
+def test_multilevel_local_uses_full_dataset_base(mode, monkeypatch):
+    monkeypatch.setenv("FLORENCE_DATASET", "/test/full_univtac")
+    monkeypatch.delenv("FLORENCE_OVERFIT_DATASET", raising=False)
+    cfg = composed(f"wah_multilevel_local_{mode}")
+    result = build_gr00t_config(cfg)
+
+    assert cfg.data.get("expected_episode_ids") is None
+    assert result.data.datasets[0].dataset_paths == ["/test/full_univtac"]
+    assert result.training.max_steps == 10000
+    assert result.training.warmup_ratio == 0.05
+    assert result.training.action_head_learning_rate == pytest.approx(1e-4)
+    assert result.training.dit_learning_rate == pytest.approx(1e-5)
+    assert result.training.gradient_accumulation_steps == 8
+    assert result.training.global_batch_size == 4
+
+    assert result.model.sidecar_variant == "multilevel_local"
+    assert result.model.sidecar_num_stages == 4
+    assert result.model.sidecar_stage_indices is None
+    assert result.model.sidecar_point_stage_names == ["enc1", "enc2", "enc3", "enc4"]
+    assert result.model.sidecar_local_patch_size == 64
+    assert result.model.sidecar_window_chunk_size == 16
+    assert result.model.temporal_window_size == 0
+    assert result.model.contact_input_mode == "none"
+    assert result.model.tactile_fusion_mode == "none"
+    assert result.model.contact_prediction_loss_weight == 0.0
+
+    assert result.model.dit_training_mode == mode
+    assert result.model.freeze_pretrained_dit == (mode != "full")
+    assert result.model.tune_diffusion_model == (mode == "full")
+
+
+def test_multilevel_local_default_dataset_has_no_overfit_dependency(monkeypatch):
+    monkeypatch.delenv("FLORENCE_DATASET", raising=False)
+    monkeypatch.delenv("FLORENCE_OVERFIT_DATASET", raising=False)
+    for mode in ("frozen", "lora", "full"):
+        cfg = composed(f"wah_multilevel_local_{mode}")
+        assert cfg.data.get("expected_episode_ids") is None
+        assert list(cfg.data.datasets[0].dataset_paths) == ["data/univtac"]
+        assert "overfit" not in OmegaConf.to_yaml(cfg).lower()
+
+
+def test_multilevel_local_dataset_validation_is_explicit(tmp_path, monkeypatch):
+    missing = tmp_path / "missing-full-univtac"
+    monkeypatch.setenv("FLORENCE_DATASET", str(missing))
+    cfg = composed("wah_multilevel_local_frozen")
+    with pytest.raises(ValueError, match=r"Dataset directory does not exist.*FLORENCE_DATASET"):
+        validate_dataset_inputs(cfg)
+
+    dataset = tmp_path / "full-univtac"
+    metadata = dataset / "meta"
+    metadata.mkdir(parents=True)
+    (metadata / "info.json").write_text("{}")
+    (metadata / "modality.json").write_text("{}")
+    monkeypatch.setenv("FLORENCE_DATASET", str(dataset))
+    validate_dataset_inputs(composed("wah_multilevel_local_full"))
+
+
+def test_existing_overfit_and_legacy_defaults_are_unchanged(monkeypatch):
+    monkeypatch.setenv("FLORENCE_OVERFIT_DATASET", "/test/independent-overfit5")
+    overfit = composed("univtac_overfit5")
+    assert list(overfit.data.expected_episode_ids) == [0, 1, 2, 3, 4]
+    assert list(overfit.data.datasets[0].dataset_paths) == ["/test/independent-overfit5"]
+    legacy = build_gr00t_config(composed("univtac_full"))
+    assert legacy.model.sidecar_variant == "legacy"
+
 
 @pytest.mark.parametrize(
     "key,value,message",

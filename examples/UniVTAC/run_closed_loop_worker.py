@@ -154,11 +154,23 @@ def _git_value(path: Path, *arguments: str) -> str | None:
 def _configure_tactile_observations(
     observations: dict, modality_configs: dict, sensor_contract: dict | None
 ) -> None:
-    """Request only the trained tactile stream, overriding task YAML defaults."""
+    """Request policy and renderer tactile streams without conflating their uses.
+
+    UniVTAC's video compositor reads ``rgb_marker`` from both runtime tactile
+    sensors even when the policy itself has no tactile input. A tactile-aware
+    WAH policy may instead be trained on another stream (currently ``rgb``), so
+    keep that exact contract source and additionally request the renderer stream.
+    """
     observations.pop("tactile", None)
+    requested = []
     if "tactile" in modality_configs:
+        if sensor_contract is None:
+            raise ValueError("A tactile policy requires a sensor contract.")
         source = sensor_contract["tactile"]["rgb"]["source_key"].split("/")[-1]
-        observations["tactile"] = [source]
+        requested.append(source)
+    if "rgb_marker" not in requested:
+        requested.append("rgb_marker")
+    observations["tactile"] = requested
 
 
 def _config_profile(config: dict[str, Any]) -> tuple[str, str, str]:
@@ -535,7 +547,7 @@ def _finish_video(
     seed: int,
     success: bool | None,
     termination_reason: str,
-) -> Path:
+) -> Path | None:
     finalize_started_ns = time.perf_counter_ns()
     tag = "success" if success is True else "failed" if success is False else "error"
     ffmpeg_process = getattr(task.video_handler, "ffmpeg", None)
@@ -546,7 +558,17 @@ def _finish_video(
     task.clean_cache(result=tag)
     GLOBAL_PROFILER.record_ns("finalization.ffmpeg", time.perf_counter_ns() - finalize_started_ns)
     if monitor["frames"] < 1:
-        raise RuntimeError("UniVTAC video handler received no frames.")
+        # A reset or observation exception can happen before the compositor
+        # produces its first frame. FFmpeg still needs to be closed, but the
+        # absence of video must not replace the original episode exception.
+        source = task.save_video_path.with_name(f"{task.save_video_path.stem}_{tag}.mp4")
+        if source.is_file():
+            source.unlink()
+        _diagnostic(
+            "video_skipped",
+            "no frames were generated; FFmpeg was cleaned up without retaining an empty MP4",
+        )
+        return None
     if ffmpeg_process is None:
         raise RuntimeError("UniVTAC video handler never initialized FFmpeg.")
     if ffmpeg_process.returncode != 0:
@@ -679,6 +701,49 @@ def _array_shapes(value: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
             "nonfinite_ratio": float(1.0 - np.mean(finite)) if finite is not None else None,
         }
     return result
+
+
+def _observation_schema(value: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
+    """Describe nested observation leaves without copying tensors or reading values."""
+    result: dict[str, dict[str, Any]] = {}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            result.update(_observation_schema(child, child_prefix))
+    elif hasattr(value, "shape") and hasattr(value, "dtype"):
+        result[prefix] = {
+            "shape": [int(dimension) for dimension in value.shape],
+            "dtype": str(value.dtype),
+            "device": str(getattr(value, "device", "cpu")),
+        }
+    else:
+        result[prefix] = {"type": type(value).__name__}
+    return result
+
+
+def _validate_video_renderer_observation(observation: dict[str, Any]) -> None:
+    """Fail with an actionable schema error before calling UniVTAC's compositor."""
+    required = (
+        ("observation", "head", "rgb"),
+        ("observation", "wrist", "rgb"),
+        ("tactile", "left_tactile", "rgb_marker"),
+        ("tactile", "right_tactile", "rgb_marker"),
+    )
+    missing = []
+    for path in required:
+        value: Any = observation
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                missing.append(".".join(path))
+                break
+            value = value[key]
+    if missing:
+        available = sorted(_observation_schema(observation))
+        raise ValueError(
+            "UniVTAC video renderer observation is missing "
+            f"{missing}; available fields are {available}. The renderer requires the "
+            "actual tactile rgb_marker streams and will not substitute camera RGB."
+        )
 
 
 def _run(
@@ -824,6 +889,19 @@ def _run(
         _configure_tactile_observations(
             env_cfg.obs_data_type, policy.modality_configs, policy.history.sensor_contract
         )
+        metadata["observation_requirements"] = {
+            "policy_modalities": sorted(policy.modality_configs),
+            "policy_tactile_stream": (
+                policy.history.sensor_contract["tactile"]["rgb"]["source_key"]
+                if needs_tactile
+                else None
+            ),
+            "video_renderer_tactile_fields": [
+                "tactile.left_tactile.rgb_marker",
+                "tactile.right_tactile.rgb_marker",
+            ],
+            "requested_tactile_streams": list(env_cfg.obs_data_type["tactile"]),
+        }
         _diagnostic("policy_initialization", "complete", level="normal")
 
         _write_worker_results(
@@ -947,7 +1025,23 @@ def _run(
                         "wah_calibration",
                         json.dumps(sensor_adapter.metadata, sort_keys=True),
                     )
+                if episode_index == 0:
+                    runtime_tactiles = sorted(
+                        getattr(getattr(task, "_tactile_manager", None), "tactiles", {})
+                    )
+                    observation_report = {
+                        **metadata["observation_requirements"],
+                        "runtime_tactile_sensors": runtime_tactiles,
+                        "available_fields": _observation_schema(observation),
+                    }
+                    metadata["observation_schema"] = observation_report
+                    _diagnostic(
+                        "observation_schema",
+                        json.dumps(observation_report, sort_keys=True),
+                        level="normal",
+                    )
                 _diagnostic("observation_initial", "complete")
+                _validate_video_renderer_observation(observation)
                 initial_frame = task.get_frame_shot(observation)
                 task.video_handler.write(initial_frame)
 
@@ -1200,17 +1294,21 @@ def _run(
                     )
                 if reset_started or getattr(task.video_handler, "ffmpeg", None) is not None:
                     try:
-                        video_path = str(
-                            _finish_video(
-                                task,
-                                monitor=video_monitor,
-                                output_dir=args.output_dir,
-                                task_name=args.task,
-                                seed=seed,
-                                success=success,
-                                termination_reason=termination_reason,
-                            )
+                        finalized_video = _finish_video(
+                            task,
+                            monitor=video_monitor,
+                            output_dir=args.output_dir,
+                            task_name=args.task,
+                            seed=seed,
+                            success=success,
+                            termination_reason=termination_reason,
                         )
+                        if finalized_video is not None:
+                            video_path = str(finalized_video)
+                        elif not error:
+                            raise RuntimeError(
+                                "Episode completed without generating any video frames."
+                            )
                     except Exception:
                         video_error = traceback.format_exc()
                         error = f"{error}\nVideo finalization error:\n{video_error}".strip()
