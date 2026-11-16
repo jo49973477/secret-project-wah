@@ -8,3 +8,7 @@ dit_training:
 model:
   tune_diffusion_model: true
   freeze_pretrained_dit: false
+  sidecar_action_gate_init:
+    mode: uniform
+    low: 0
+    high: 0.3
