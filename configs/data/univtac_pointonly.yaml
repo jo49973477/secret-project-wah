@@ -1,0 +1,14 @@
+
+defaults:
+  - univtac_rgb
+  - _self_
+
+# RGB, State, Action, Language는 univtac_rgb에서 상속
+# Point Cloud만 추가하고 Tactile은 포함하지 않음
+modalities:
+  action:
+    horizon: 16
+
+  pointcloud:
+    delta_indices: [0]
+    modality_keys: [scene]

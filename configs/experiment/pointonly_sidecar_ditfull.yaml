@@ -1,0 +1,65 @@
+
+# @package _global_
+
+defaults:
+  - florence_full_base
+  - override /data: univtac_pointonly
+  - override /hardware: dual_3090_zero3
+  - _self_
+
+name: pointonly_sidecar_ditfull
+
+# Architecture
+temporal:
+  window_size: 0
+
+dit_training:
+  mode: full
+
+model:
+  sidecar_variant: legacy
+
+  # Point-only conditioning
+  use_point_conditioning: true
+  use_tactile_conditioning: false
+
+  # Disable tactile/contact paths
+  tactile_fusion_mode: none
+  contact_input_mode: none
+  contact_injection_enabled: false
+  contact_prediction_loss_weight: 0.0
+
+  # Trainability
+  tune_point_encoder: true
+  tune_tactile_encoder: false
+  tune_multimodal_adapter: true
+  tune_diffusion_model: true
+  freeze_pretrained_dit: false
+
+  # Gate initialization: original baseline
+  sidecar_point_gate_init:
+    mode: uniform
+    low: 0
+    high: 0.3
+  sidecar_action_gate_init:
+    mode: uniform
+    low: 0.7
+    high: 1.0
+
+# Training
+training:
+  point_encoder_learning_rate: 0.00001
+  action_head_learning_rate: 0.0001
+  max_steps: 10000
+  gradient_accumulation_steps: 1
+  wandb_group: pointonly-actionnormal-tuned-sidecar-ditfull
+
+# Hardware
+hardware:
+  global_batch_size: 32
+  gradient_accumulation_steps: 1
+
+# Monitoring
+trainctl:
+  enabled: true
+  message_mode: sopia
