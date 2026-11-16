@@ -64,3 +64,41 @@ def test_deepspeed_optimizer_step_snapshots_are_one_shot(monkeypatch) -> None:
         "before_first_optimizer_step",
         "after_first_optimizer_step",
     ]
+
+
+def test_gradient_audit_survives_first_step_memory_wrapper(monkeypatch):
+    calls = []
+    monkeypatch.setattr(trainer_module, "log_memory_snapshot", lambda *args: None)
+    optimizer = SimpleNamespace(step=lambda: calls.append("optimizer"))
+    engine = SimpleNamespace(optimizer=optimizer)
+
+    class Audit:
+        installed = False
+
+        def install(self, model):
+            if self.installed:
+                return
+            self.installed = True
+            original = model.optimizer.step
+
+            def audited():
+                calls.append("audit")
+                original()
+
+            model.optimizer.step = audited
+
+        def record_loss(self, loss):
+            assert torch.isfinite(loss)
+
+    def training_step(self, model, *args):
+        model.optimizer.step()
+        return torch.tensor(1.0)
+
+    monkeypatch.setattr(trainer_module.Trainer, "training_step", training_step)
+    trainer = object.__new__(trainer_module.Gr00tTrainer)
+    trainer.is_deepspeed_enabled = True
+    trainer.multimodal_monitor = None
+    trainer.zero3_gradient_audit = Audit()
+    trainer.training_step(engine, {})
+    trainer.training_step(engine, {})
+    assert calls == ["audit", "optimizer", "audit", "optimizer"]

@@ -695,6 +695,9 @@ def run(config: Config):
     # Train and finalize. Keep the original traceback and nonzero process exit.
     # trainctl decides completion/failure only after this entire process exits.
     logging.info("🚀 Starting training...")
+    from gr00t.experiment.parameter_layout import audit_parameter_layout
+
+    audit_parameter_layout(trainer.model)
     zero3_debug = os.environ.get("GR00T_ZERO3_DEBUG", "").lower() in {"1", "true", "yes"}
     if zero3_debug:
         logging.warning("ZeRO-3 debug enabled: autograd anomaly detection is active")

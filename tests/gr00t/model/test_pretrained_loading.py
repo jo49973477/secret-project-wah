@@ -133,7 +133,11 @@ def test_real_hf_nested_load_parity(checkpoint, monkeypatch, load_bf16, tune_llm
             assert torch.equal(buffer, legacy_buffers[name]), name
     for module in optimized.backbone.model.visual.modules():
         if isinstance(module, torch.nn.Conv3d):
-            assert module.weight.is_contiguous(memory_format=torch.channels_last_3d)
+            assert module.weight.is_contiguous()
+            assert (
+                module.weight.to(torch.bfloat16).view(torch.uint8).numel()
+                == module.weight.numel() * 2
+            )
             assert len(module._forward_pre_hooks) == 1
     for a, b in zip(legacy.parameters(), optimized.parameters()):
         assert a.requires_grad == b.requires_grad

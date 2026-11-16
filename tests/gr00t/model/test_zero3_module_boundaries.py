@@ -53,3 +53,41 @@ def test_deepspeed_finds_plain_dict_tensors_but_not_batchfeature() -> None:
     touched.clear()
     zero_utils.apply_to_tensors_only(visit, BatchFeature(data={"features": tensor}))
     assert not touched
+
+
+@pytest.mark.gpu
+@pytest.mark.multigpu
+def test_zero3_leaf_checkpoint_gradients_and_accumulation():
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA GPUs")
+    pytest.importorskip("deepspeed")
+    root = Path(__file__).resolve().parents[3]
+    env = dict(os.environ, OMP_NUM_THREADS="1", PYTHONPATH=str(root))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc_per_node=2",
+            str(Path(__file__).with_name("_run_zero3_local_checkpoint.py")),
+        ],
+        cwd=root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout
+    assert result.stdout.count("accumulation=2 PASS") == 2, result.stdout
+    print(
+        "\n".join(
+            line for line in result.stdout.splitlines() if "ZERO3_LOCAL_CHECKPOINT_PARITY" in line
+        )
+    )

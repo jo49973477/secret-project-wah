@@ -233,6 +233,11 @@ class Gr00tTrainer(Trainer):
         diagnostics_level = kwargs.pop("multimodal_diagnostics_level", "basic")
         self.multimodal_diagnostics_interval = kwargs.pop("multimodal_diagnostics_interval", 50)
         super().__init__(*args, **kwargs)
+        self.zero3_gradient_audit = None
+        if os.environ.get("GR00T_ZERO3_DEBUG", "").lower() in {"1", "true", "yes"}:
+            from gr00t.experiment.zero3_debug import Zero3GradientAudit
+
+            self.zero3_gradient_audit = Zero3GradientAudit(self.model, self.args.output_dir)
         self.sample_exposure = SampleExposure(self.train_dataset, self.args)
         if self.is_deepspeed_enabled:
             # Transformers leaves Accelerator's plugin at its default 1 while its
@@ -969,8 +974,14 @@ class Gr00tTrainer(Trainer):
         if self.multimodal_monitor is not None and self.is_deepspeed_enabled:
             self.multimodal_monitor.install_deepspeed(model)
         if self.is_deepspeed_enabled:
+            if self.zero3_gradient_audit is not None:
+                self.zero3_gradient_audit.install(model)
+            # The one-shot memory wrapper restores its captured step method.
+            # Install it last so it restores the persistent gradient audit.
             self._install_first_deepspeed_optimizer_step_diagnostics(model)
         loss = super().training_step(model, inputs, num_items_in_batch)
+        if self.is_deepspeed_enabled and self.zero3_gradient_audit is not None:
+            self.zero3_gradient_audit.record_loss(loss)
         if not self.is_deepspeed_enabled and not getattr(
             self, "_first_backward_memory_logged", False
         ):

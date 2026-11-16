@@ -364,11 +364,14 @@ class Qwen3Backbone(torch.nn.Module):
             self._apply_vision_patch_embed_channels_last()
 
     def _apply_vision_patch_embed_channels_last(self) -> None:
-        """Force the Qwen3-VL vision patch-embed ``Conv3d`` to ``channels_last_3d``.
+        """Use channels-last activations for the Qwen3-VL vision patch embed.
 
         On torch>=2.9 (cuDNN 9.10.x) the contiguous bf16 patch-embed ``Conv3d``
         dispatches to a pathologically slow kernel on sm_80; ``channels_last_3d``
         selects the fast one and is numerically equivalent (harmless elsewhere).
+        Keep registered weights contiguous: DeepSpeed broadcasts them via a
+        byte view, which requires final stride 1. Converting only the input
+        retains the cuDNN layout hint without changing parameter storage or ties.
         """
         visual = getattr(self.model, "visual", None)
         if visual is None:
@@ -389,14 +392,13 @@ class Qwen3Backbone(torch.nn.Module):
         patched = 0
         for module in visual.modules():
             if isinstance(module, torch.nn.Conv3d):
-                module.to(memory_format=torch.channels_last_3d)
                 if not getattr(module, "_gr00t_channels_last_hook", False):
                     module.register_forward_pre_hook(_to_channels_last_3d)
                     module._gr00t_channels_last_hook = True
                 patched += 1
         if patched:
             logger.debug(
-                "Applied channels_last_3d to %d vision patch-embed Conv3d module(s) "
+                "Applied channels_last_3d input hook to %d vision patch-embed Conv3d module(s) "
                 "(torch>=2.9 cuDNN Conv3d perf workaround).",
                 patched,
             )

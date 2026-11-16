@@ -91,7 +91,37 @@ class LocalJointActionStage(nn.Module):
         attended = attended.transpose(1, 2).reshape(tokens.shape)
         return self.attention_projection(attended)[:, :horizon]
 
-    def forward(self, action, level, point_mask=None, action_mask=None, observer=None, stage=0):
+    def forward(
+        self,
+        action,
+        level,
+        point_mask=None,
+        action_mask=None,
+        observer=None,
+        stage=0,
+        *,
+        checkpoint_activations=False,
+    ):
+        # The ZeRO leaf module's gather/release and backward hooks must surround
+        # checkpointing, rather than being replayed by it. Replaying __call__
+        # releases gathered weights at the end of recomputation while the
+        # original autograd graph still needs them (e.g. output_projection).
+        if checkpoint_activations and torch.is_grad_enabled():
+            from torch.utils.checkpoint import checkpoint
+
+            return checkpoint(
+                self._forward,
+                action,
+                level,
+                point_mask,
+                action_mask,
+                observer,
+                stage,
+                use_reentrant=False,
+            )
+        return self._forward(action, level, point_mask, action_mask, observer, stage)
+
+    def _forward(self, action, level, point_mask=None, action_mask=None, observer=None, stage=0):
         if point_mask is not None:
             raise ValueError(
                 "Local stages use packed valid points and offsets, not a padded point mask"

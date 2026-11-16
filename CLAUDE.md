@@ -77,3 +77,48 @@ getting_started/    # User-facing guides and notebooks
 - **DGX Spark:** CUDA 13.0 — install via `scripts/deployment/spark/install_deps.sh`, container via `scripts/deployment/spark/Dockerfile`
 
 Each Jetson/Spark platform ships an `activate_*.sh` helper (`scripts/activate_orin.sh`, `scripts/activate_spark.sh`, `scripts/activate_thor.sh`) that exports platform-specific library paths. For dGPU, the standard `source .venv/bin/activate` is sufficient.
+
+# WAH Project Instructions
+
+Follow the global AGENTS.md instructions in addition to
+these project-specific rules.
+
+## 1. Logging & Monitoring
+- Integrate new functionality and experiments into the
+  existing Rich Terminal and WandB workflows.
+- Use Rich Terminal for readable real-time progress,
+  metrics, and status reporting.
+- Use WandB to persist training metrics, configurations,
+  and experiment comparisons.
+- Reuse existing logging infrastructure.
+- For rollouts, Rich Terminal monitoring is sufficient.
+  Do not modify rollouts solely to add WandB logging.
+- Avoid meaningless WandB metrics for non-training code.
+
+## 2. Experiment Naming
+- Name new training methods and architectures with
+  three components in this order:
+  [specific change]_[overall architecture]_[DiT scope]
+- Component 1: e.g., temporal, pointonly.
+- Component 2: e.g., sidecar, multilevel.
+- Component 3: ditfrozen, ditlora, or ditfull.
+- Examples:
+  temporal_sidecar_ditlora
+  pointonly_multilevel_ditfull
+- Follow existing repository separator conventions.
+- User-specified names always take precedence.
+- Never rename existing experiments or checkpoints
+  without explicit permission.
+
+## 3. Experiment Reproducibility
+- Preserve existing training configurations by default.
+- Never silently change datasets, preprocessing,
+  hyperparameters, or evaluation conditions.
+- Keep configurations, seeds, and checkpoints traceable.
+- Report changes affecting experiment comparisons.
+
+## 4. Compatibility
+- Preserve training, inference, and rollout interfaces.
+- Avoid breaking existing configurations, checkpoints,
+  and execution commands.
+- Explain unavoidable breaking changes before proceeding.

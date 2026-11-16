@@ -360,16 +360,10 @@ class SidecarConditionedDiT(AlternateVLDiT):
                             getattr(self, "_diagnostic_observer", None),
                             stage,
                         )
-                        if torch.is_grad_enabled() and self.gradient_checkpointing:
-                            from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
-
-                            # Recompute through the module post-hooks as well as its tensors.
-                            with set_checkpoint_early_stop(False):
-                                action, _ = checkpoint(
-                                    self.sidecar_stages[stage], *local_args, use_reentrant=False
-                                )
-                        else:
-                            action, _ = self.sidecar_stages[stage](*local_args)
+                        action, _ = self.sidecar_stages[stage](
+                            *local_args,
+                            checkpoint_activations=self.gradient_checkpointing,
+                        )
                 if contact_tokens is not None and self.contact_injection_enabled:
                     before_contact = action
                     action = self.contact_injections[stage](action, contact_tokens, contact_mask)
