@@ -147,6 +147,9 @@ if __name__ == "__main__":
     config.model.sidecar_hidden_dim = ft_config.sidecar_hidden_dim
     config.model.sidecar_num_heads = ft_config.sidecar_num_heads
     config.model.sidecar_num_point_tokens = ft_config.sidecar_num_point_tokens
+    config.model.sidecar_point_gate_init = ft_config.sidecar_point_gate_init
+    config.model.sidecar_action_gate_init = ft_config.sidecar_action_gate_init
+    config.model.sidecar_gate_init_seed = ft_config.sidecar_gate_init_seed
     config.model.tactile_fusion_mode = ft_config.tactile_fusion_mode
     config.model.contact_num_tokens = ft_config.contact_num_tokens
     config.model.contact_hidden_dim = ft_config.contact_hidden_dim

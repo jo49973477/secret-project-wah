@@ -9,10 +9,12 @@ from torch import nn
 import torch.nn.functional as F
 
 from gr00t.configs.sidecar_config import (
+    default_action_gate_init,
     resolve_point_stages as resolve_point_stages,
     validate_checkpoint_variant as validate_checkpoint_variant,
     validate_variant as validate_variant,
 )
+from gr00t.model.extension.point_action_sidecar import gate_parameter
 
 
 def snapshot_level(point, expected_dim):
@@ -56,7 +58,19 @@ def validate_level(level, expected_dim, batch_size=None):
 
 
 class LocalJointActionStage(nn.Module):
-    def __init__(self, action_dim, point_dim, dim, heads, patch_size=64, window_chunk_size=16):
+    def __init__(
+        self,
+        action_dim,
+        point_dim,
+        dim,
+        heads,
+        patch_size=64,
+        window_chunk_size=16,
+        *,
+        action_gate_init=None,
+        gate_init_seed=42,
+        stage_index=0,
+    ):
         super().__init__()
         if min(patch_size, window_chunk_size, heads, dim) < 1 or dim % heads:
             raise ValueError("Invalid local attention dimensions or window sizes")
@@ -69,7 +83,13 @@ class LocalJointActionStage(nn.Module):
         self.qkv = nn.Linear(dim, 3 * dim)
         self.attention_projection = nn.Linear(dim, dim)
         self.output_projection = nn.Linear(dim, action_dim)
-        self.action_gate = nn.Parameter(torch.zeros(()))
+        self.action_gate, self.initial_action_gate, self.action_gate_init = gate_parameter(
+            action_gate_init,
+            default=default_action_gate_init,
+            seed=gate_init_seed,
+            stage=stage_index,
+            kind="action",
+        )
         self.last_diagnostics = {}
         # Window counts vary across ranks: gather once per stage, not per chunk.
         self._z3_leaf = True
@@ -177,13 +197,15 @@ class LocalJointActionStage(nn.Module):
             outputs.append((total / windows).to(action.dtype))
             start = end
         delta = self.output_projection(torch.stack(outputs))
-        update = self.action_gate * delta
         if action_mask is not None:
-            update = update * action_mask[..., None].to(update.dtype)
+            delta = delta * action_mask[..., None].to(delta.dtype)
+        update = self.action_gate * delta
+        result = action + update
         if observer is not None:
             masked_action = (
                 action if action_mask is None else action * action_mask[..., None].to(action.dtype)
             )
+            actual_residual = result - action
             self.last_diagnostics = dict(
                 point_counts=[sum(c) for c in counts_by_batch],
                 window_counts=[len(c) for c in counts_by_batch],
@@ -191,16 +213,21 @@ class LocalJointActionStage(nn.Module):
                 point_feature_norm=float(feat.detach().float().norm()),
                 action_feature_norm=float(masked_action.detach().float().norm()),
                 action_gate=float(self.action_gate.detach()),
-                action_update_norm=float(
-                    (delta if action_mask is None else delta * action_mask[..., None])
-                    .detach()
-                    .float()
-                    .norm()
-                ),
+                action_gate_initial_value=self.initial_action_gate,
+                action_pre_gate_update_norm=float(delta.detach().float().norm()),
+                action_update_norm=float(delta.detach().float().norm()),
+                action_gated_residual_norm=float(update.detach().float().norm()),
                 action_residual_norm=float(update.detach().float().norm()),
+                action_actual_residual_norm=float(actual_residual.detach().float().norm()),
+                action_bf16_loss_norm=(
+                    float((update.detach().float() - actual_residual.detach().float()).norm())
+                    if action.dtype == torch.bfloat16
+                    else None
+                ),
                 action_injection_ratio=float(
-                    update.detach().float().norm() / (masked_action.detach().float().norm() + 1e-12)
+                    actual_residual.detach().float().norm()
+                    / (masked_action.detach().float().norm() + 1e-12)
                 ),
             )
-            observer("sidecar_action", stage, masked_action, update)
-        return action + update, level
+            observer("sidecar_action", stage, masked_action, actual_residual)
+        return result, level

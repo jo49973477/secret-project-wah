@@ -14,6 +14,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from gr00t.configs.hydra_config import build_gr00t_config, preflight
+from gr00t.configs.sidecar_config import default_action_gate_init, default_point_gate_init
 from gr00t.experiment.dashboard_telemetry import ParentDashboard
 from gr00t.experiment.trainctl_launch import LogRelay, check_trainctl, trainctl_run
 from gr00t.utils.sensor_dependency_preflight import check_sensor_dependencies
@@ -113,6 +114,9 @@ def resolve_resume(cfg: DictConfig, config) -> Path | None:
                 "sidecar_point_stage_names": None,
                 "sidecar_local_patch_size": 64,
                 "sidecar_window_chunk_size": 16,
+                "sidecar_point_gate_init": default_point_gate_init(),
+                "sidecar_action_gate_init": default_action_gate_init(),
+                "sidecar_gate_init_seed": 42,
             }
             for key, value in defaults.items():
                 before.setdefault(key, value)

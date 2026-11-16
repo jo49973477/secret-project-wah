@@ -671,6 +671,13 @@ class TestActionHeadTimeSamplingMetaSafe:
 class TestActionHeadTrainableParams:
     """Test parameter freezing."""
 
+    def test_projector_enabled_trains_state_action_encoders_and_decoder(self):
+        head = Gr00tN1d7ActionHead(_small_config(tune_projector=True))
+        for module in (head.state_encoder, head.action_encoder, head.action_decoder):
+            parameters = list(module.parameters())
+            assert parameters
+            assert all(parameter.requires_grad for parameter in parameters)
+
     def test_all_trainable_by_default(self, action_head):
         head, _ = action_head
         head.set_trainable_parameters(True, True, True)

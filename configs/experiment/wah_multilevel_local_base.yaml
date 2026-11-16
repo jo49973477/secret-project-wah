@@ -12,5 +12,7 @@ model:
   sidecar_point_stage_names: [enc1, enc2, enc3, enc4]
   sidecar_local_patch_size: 64
   sidecar_window_chunk_size: 16
+  # This variant has no point gate. It inherits the compatibility-only `one`
+  # point setting and applies only sidecar_action_gate_init to its local stages.
 training:
   wandb_group: wah-multilevel-local

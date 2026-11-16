@@ -39,9 +39,17 @@ model:
   tune_diffusion_model: false
   freeze_pretrained_dit: true
   tune_multimodal_adapter: true
-  state_dropout_prob: 0.0
+  state_dropout_prob: 0.2
   action_head_dropout_override: 0.0
   vl_self_attention_dropout_override: 0.0
+  sidecar_point_gate_init:
+    mode: uniform
+    low: 0.7
+    high: 1.0
+  sidecar_action_gate_init:
+    mode: uniform
+    low: 0
+    high: 0.3
 training:
   max_steps: 10000
   wandb_project: Florence

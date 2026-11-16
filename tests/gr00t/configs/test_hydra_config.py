@@ -136,6 +136,11 @@ def test_florence_2x2_full_dataset_experiment_modes(name, family, dit_mode, monk
     assert result.model.dit_training_mode == dit_mode
     assert result.model.freeze_pretrained_dit == (dit_mode == "lora")
     assert result.model.tune_diffusion_model == (dit_mode == "full")
+    assert result.model.tune_projector
+    assert not result.model.tune_vlln
+    assert result.model.state_dropout_prob == pytest.approx(0.2)
+    assert result.model.action_horizon == 40
+    assert result.data.modality_configs["new_embodiment"]["action"].delta_indices == list(range(16))
     assert result.model.tactile_fusion_mode == "none"
     assert result.model.contact_prediction_loss_weight == 0.0
     assert result.model.use_point_conditioning
@@ -182,6 +187,11 @@ def test_multilevel_local_uses_full_dataset_base(mode, monkeypatch):
     assert result.model.contact_input_mode == "none"
     assert result.model.tactile_fusion_mode == "none"
     assert result.model.contact_prediction_loss_weight == 0.0
+    assert result.model.tune_projector
+    assert not result.model.tune_vlln
+    assert result.model.state_dropout_prob == pytest.approx(0.2)
+    assert result.model.action_horizon == 40
+    assert result.data.modality_configs["new_embodiment"]["action"].delta_indices == list(range(16))
 
     assert result.model.dit_training_mode == mode
     assert result.model.freeze_pretrained_dit == (mode != "full")
@@ -297,7 +307,7 @@ def test_modality_regression_against_legacy():
     spec = importlib.util.spec_from_file_location("univtac_common_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    for name, multimodal, horizon in [("univtac_rgb", False, 16), ("univtac_full", True, 40)]:
+    for name, multimodal, horizon in [("univtac_rgb", False, 16), ("univtac_full", True, 16)]:
         actual = build_gr00t_config(composed(name)).data.modality_configs["new_embodiment"]
         expected = module.build_univtac_config(multimodal=multimodal, action_horizon=horizon)
         assert {k: asdict(v) for k, v in actual.items()} == {
@@ -400,7 +410,7 @@ def test_snapshots_resume_and_compatibility(tmp_path):
     with pytest.raises(ValueError, match="training.action_head_learning_rate"):
         resolve_resume(cfg, build_gr00t_config(cfg))
     cfg.training.action_head_learning_rate = None
-    cfg.data.modalities.action.horizon = 16
+    cfg.data.modalities.action.horizon = 15
     with pytest.raises(ValueError, match="data.modalities"):
         resolve_resume(cfg, build_gr00t_config(cfg))
 

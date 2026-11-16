@@ -97,7 +97,13 @@ def gate_rows(dit):
             point_stage=getattr(dit, "sidecar_point_stage_names", [])[i]
             if getattr(dit, "sidecar_variant", "legacy") == "multilevel_local"
             else None,
+            point_gate_init_mode=stage.point_gate_init["mode"]
+            if hasattr(stage, "point_gate")
+            else None,
+            point_gate_initial_value=getattr(stage, "initial_point_gate", None),
             action_gate=float(full_value(stage.action_gate)),
+            action_gate_init_mode=stage.action_gate_init["mode"],
+            action_gate_initial_value=stage.initial_action_gate,
         )
         for i, (block, stage) in enumerate(zip(dit.stage_indices, dit.sidecar_stages))
     ]

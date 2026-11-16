@@ -124,8 +124,16 @@ def initialize_missing_sidecar(model, missing_keys):
             cfg.sidecar_num_heads,
         ),
         "sidecar_stages": lambda: torch.nn.ModuleList(
-            PointActionStage(dit.inner_dim, cfg.sidecar_hidden_dim, cfg.sidecar_num_heads)
-            for _ in dit.sidecar_stages
+            PointActionStage(
+                dit.inner_dim,
+                cfg.sidecar_hidden_dim,
+                cfg.sidecar_num_heads,
+                point_gate_init=getattr(cfg, "sidecar_point_gate_init", None),
+                action_gate_init=getattr(cfg, "sidecar_action_gate_init", None),
+                gate_init_seed=getattr(cfg, "sidecar_gate_init_seed", 42),
+                stage_index=stage,
+            )
+            for stage, _ in enumerate(dit.sidecar_stages)
         ),
         "contact_adapter": lambda: ContactSurprise(
             dit.inner_dim,
@@ -168,8 +176,11 @@ def initialize_missing_sidecar(model, missing_keys):
                 cfg.sidecar_num_heads,
                 cfg.sidecar_local_patch_size,
                 cfg.sidecar_window_chunk_size,
+                action_gate_init=getattr(cfg, "sidecar_action_gate_init", None),
+                gate_init_seed=getattr(cfg, "sidecar_gate_init_seed", 42),
+                stage_index=stage,
             )
-            for dim in dimensions
+            for stage, dim in enumerate(dimensions)
         )
 
     for name, factory in factories.items():

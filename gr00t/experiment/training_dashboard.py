@@ -85,6 +85,10 @@ class TrainingDashboardCallback(TrainerCallback):
         "sidecar/point_gate_mean_abs": "Point Gate",
         "sidecar/action_residual_ratio": "Action Residual",
         "sidecar/point_residual_ratio": "Point Residual",
+        "sidecar/action_pre_gate_update_norm": "Action Pre-Gate Norm",
+        "sidecar/action_gated_residual_norm": "Action Gated Norm",
+        "sidecar/action_actual_residual_norm": "Action Applied Norm",
+        "sidecar/action_bf16_loss_norm": "Action BF16 Loss",
     }
 
     def __init__(

@@ -426,13 +426,31 @@ def test_hf_model_roundtrip_and_variant_override_rejection(monkeypatch, tmp_path
     monkeypatch.setattr(module, "build_point_encoder", mock_builder)
     monkeypatch.setattr(processing, "Gr00tN1d7DataCollator", lambda **kw: None)
     cfg = head_config()
+    cfg.sidecar_action_gate_init = {
+        "mode": "constant",
+        "value": 0.02,
+        "low": 0.01,
+        "high": 0.05,
+        "mean": 0.02,
+        "std": 0.01,
+    }
     original = module.Gr00tN1d7(cfg).eval()
+    assert all(
+        stage.action_gate.item() == pytest.approx(0.02)
+        for stage in original.action_head.model.sidecar_stages
+    )
+    with torch.no_grad():
+        for index, stage in enumerate(original.action_head.model.sidecar_stages):
+            stage.action_gate.fill_(0.25 + index)
     original.save_pretrained(tmp_path)
     restored, info = AutoModel.from_pretrained(tmp_path, output_loading_info=True)
     assert not info["missing_keys"] and not info["unexpected_keys"]
     restored.eval()
     for name, value in original.state_dict().items():
         torch.testing.assert_close(value, restored.state_dict()[name], rtol=0, atol=0, msg=name)
+    assert [stage.action_gate.item() for stage in restored.action_head.model.sidecar_stages] == [
+        0.25 + index for index in range(len(restored.action_head.model.sidecar_stages))
+    ]
     action = dict(_make_action_input(cfg))
     action.pop("action")
     action["points"] = torch.randn(2, 33, 6)
@@ -448,12 +466,22 @@ def test_hf_model_roundtrip_and_variant_override_rejection(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("variant", ["legacy", "multilevel_local"])
-def test_hf_missing_adapter_initialization(monkeypatch, tmp_path, variant):
+@pytest.mark.parametrize("value", [0.0, 0.02])
+def test_hf_missing_adapter_initialization(monkeypatch, tmp_path, variant, value):
     # HF no-init contexts must not replace zero scalar gates with uninitialized values.
     from gr00t.model.gr00t_n1d7.pretrained_loading import initialize_missing_sidecar
 
     cfg = head_config(sidecar_variant=variant)
-    dit = model(variant)
+    settings = {
+        "mode": "zero" if value == 0 else "constant",
+        "value": value,
+        "low": 0.01,
+        "high": 0.05,
+        "mean": 0.02,
+        "std": 0.01,
+    }
+    cfg.sidecar_action_gate_init = settings
+    dit = model(variant, sidecar_action_gate_init=settings)
     if variant == "multilevel_local":
         cfg.sidecar_point_stage_names = dit.sidecar_point_stage_names
         cfg.sidecar_hidden_dim = 8
@@ -475,7 +503,7 @@ def test_hf_missing_adapter_initialization(monkeypatch, tmp_path, variant):
         for stage in dit.sidecar_stages:
             stage.action_gate.fill_(99)
     initialize_missing_sidecar(fake, keys)
-    assert all(s.action_gate.item() == 0 for s in dit.sidecar_stages)
+    assert all(s.action_gate.item() == pytest.approx(value) for s in dit.sidecar_stages)
 
 
 @pytest.mark.parametrize("mode", ["frozen", "lora", "full"])
@@ -533,6 +561,10 @@ def test_training_diagnostics_local_metadata(monkeypatch):
     head(_make_backbone_output(cfg), action)["loss"].backward()
     monitor.pre_step()
     assert monitor.record["sidecar_stage_mapping"][0]["point_stage"] == "enc1"
+    assert monitor.record["sidecar_action_gate_init_mode_stage_0"] == "zero"
+    assert monitor.record["sidecar/action_pre_gate_update_norm"] > 0
+    assert monitor.record["sidecar/action_gated_residual_norm"] == 0
+    assert monitor.record["sidecar/action_actual_residual_norm"] == 0
     assert monitor.record["sidecar_stage_mapping"][1]["dit_block"] == 1
     assert monitor.record["sidecar_stage_mapping"][0]["action_gate"] == 0.0
     assert monitor.record["sidecar_action_gate_stage_0"] == 0.0

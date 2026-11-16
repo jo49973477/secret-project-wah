@@ -7,6 +7,21 @@ sidecar_stage_indices: null
 sidecar_hidden_dim: 256
 sidecar_num_heads: 4
 sidecar_num_point_tokens: 32
+sidecar_point_gate_init:
+  mode: one
+  value: 1.0
+  low: 0.8
+  high: 1.2
+  mean: 1.0
+  std: 0.05
+sidecar_action_gate_init:
+  mode: zero
+  value: 0.02
+  low: 0.01
+  high: 0.05
+  mean: 0.02
+  std: 0.01
+sidecar_gate_init_seed: 42
 tactile_fusion_mode: surprise
 contact_num_tokens: 4
 contact_hidden_dim: 256
@@ -17,7 +32,7 @@ contact_injection_enabled: true
 contact_predictor_warmup: false
 tune_llm: false
 tune_visual: false
-tune_projector: false
+tune_projector: true
 tune_vlln: false
 tune_diffusion_model: false
 tune_point_encoder: false

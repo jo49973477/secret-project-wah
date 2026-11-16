@@ -2,7 +2,7 @@
 defaults:
 - wah_multilevel_local_base
 - _self_
-name: wah_multilevel_local_full
+name: pointonly-actionnormal-tuned_multilevel_ditfull
 dit_training:
   mode: full
 model:

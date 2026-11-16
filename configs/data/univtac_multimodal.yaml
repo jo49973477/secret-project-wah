@@ -3,7 +3,7 @@ defaults:
 - _self_
 modalities:
   action:
-    horizon: 40
+    horizon: 16
   pointcloud:
     delta_indices:
     - 0

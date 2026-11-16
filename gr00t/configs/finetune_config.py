@@ -17,6 +17,8 @@
 from dataclasses import dataclass, field
 import warnings
 
+from gr00t.configs.sidecar_config import default_action_gate_init, default_point_gate_init
+
 
 @dataclass
 class FinetuneConfig:
@@ -60,6 +62,9 @@ class FinetuneConfig:
     sidecar_hidden_dim: int = 256
     sidecar_num_heads: int = 4
     sidecar_num_point_tokens: int = 32
+    sidecar_point_gate_init: dict = field(default_factory=default_point_gate_init)
+    sidecar_action_gate_init: dict = field(default_factory=default_action_gate_init)
+    sidecar_gate_init_seed: int = 42
     tactile_fusion_mode: str = "surprise"
     contact_num_tokens: int = 4
     contact_hidden_dim: int = 256

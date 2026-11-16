@@ -174,9 +174,8 @@ class MultimodalDiagnostics(TrainerCallback):
         optimizer = self._zero_optimizer or self.trainer.optimizer
         scale = float(getattr(optimizer, "loss_scale", 1.0))
         for label, attribute in (("point", "point_gate"), ("action", "action_gate")):
-            gates = [
-                getattr(s, attribute) for s in self.dit.sidecar_stages if hasattr(s, attribute)
-            ]
+            gate_stages = [s for s in self.dit.sidecar_stages if hasattr(s, attribute)]
+            gates = [getattr(stage, attribute) for stage in gate_stages]
             if not gates:
                 self.record[f"sidecar_{label}_gate_mean_abs"] = None
                 continue
@@ -184,15 +183,24 @@ class MultimodalDiagnostics(TrainerCallback):
             self.record[f"sidecar_{label}_gate_mean_abs"] = sum(
                 float(v.abs().mean()) for v in values if v is not None
             ) / len(values)
-            if self.level == "per_layer":
-                for index, (gate, value) in enumerate(zip(gates, values)):
-                    gradient = full_value(gate, gradient=True)
-                    self.record[f"sidecar_{label}_gate_stage_{index}"] = (
-                        None if value is None else float(value)
-                    )
-                    self.record[f"sidecar_{label}_gate_grad_stage_{index}"] = (
-                        None if gradient is None else float(gradient) / scale
-                    )
+            for index, (stage, gate, value) in enumerate(zip(gate_stages, gates, values)):
+                gradient = full_value(gate, gradient=True)
+                gradient = None if gradient is None else gradient / scale
+                self.record[f"sidecar_{label}_gate_init_mode_stage_{index}"] = getattr(
+                    stage, f"{label}_gate_init"
+                )["mode"]
+                self.record[f"sidecar_{label}_gate_initial_stage_{index}"] = getattr(
+                    stage, f"initial_{label}_gate"
+                )
+                self.record[f"sidecar_{label}_gate_stage_{index}"] = (
+                    None if value is None else float(value)
+                )
+                self.record[f"sidecar_{label}_gate_grad_stage_{index}"] = (
+                    None if gradient is None else float(gradient)
+                )
+                self.record[f"sidecar_{label}_gate_grad_finite_stage_{index}"] = (
+                    None if gradient is None else bool(torch.isfinite(gradient).all())
+                )
             self.record[f"sidecar_{label}_gate_grad_norm"] = gradient_stats(gates, scale)[
                 "grad_norm"
             ]
@@ -213,6 +221,22 @@ class MultimodalDiagnostics(TrainerCallback):
                         self.record[f"sidecar_local/{key}_stage_{i}"] = value
                     elif key in {"point_counts", "window_counts"}:
                         self.record[f"sidecar_local/{key}_stage_{i}"] = sum(value)
+
+        diagnostic_names = (
+            "action_pre_gate_update_norm",
+            "action_gated_residual_norm",
+            "action_actual_residual_norm",
+            "action_bf16_loss_norm",
+            "action_injection_ratio",
+        )
+        for name in diagnostic_names:
+            values = []
+            for index, stage in enumerate(self.dit.sidecar_stages):
+                value = stage.last_diagnostics.get(name)
+                self.record[f"sidecar_{name}_stage_{index}"] = value
+                if isinstance(value, (float, int)):
+                    values.append(value)
+            self.record[f"sidecar/{name}"] = sum(values) / len(values) if values else None
 
         head = self.trainer.model.action_head
         groups = {

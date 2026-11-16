@@ -305,6 +305,12 @@ def test_optional_diagnostics_do_not_change_predictions():
     (after.square().mean() + m.contact_prediction_loss).backward()
     monitor.pre_step()
     assert monitor.record["sidecar_action_gate_grad_norm"] > 0
+    assert monitor.record["sidecar_action_gate_init_mode_stage_0"] == "zero"
+    assert monitor.record["sidecar_action_gate_initial_stage_0"] == 0
+    assert monitor.record["sidecar_action_gate_grad_finite_stage_0"] is True
+    assert monitor.record["sidecar/action_pre_gate_update_norm"] > 0
+    assert monitor.record["sidecar/action_gated_residual_norm"] == 0
+    assert monitor.record["sidecar/action_actual_residual_norm"] == 0
     assert monitor.record["contact_prediction_loss"] >= 0
     assert "sidecar_point_residual_ratio_stage_0" in monitor.record
     monitor.post_step()

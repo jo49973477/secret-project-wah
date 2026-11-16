@@ -343,6 +343,9 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                         sidecar_hidden_dim=self.config.model.sidecar_hidden_dim,
                         sidecar_num_heads=self.config.model.sidecar_num_heads,
                         sidecar_num_point_tokens=self.config.model.sidecar_num_point_tokens,
+                        sidecar_point_gate_init=self.config.model.sidecar_point_gate_init,
+                        sidecar_action_gate_init=self.config.model.sidecar_action_gate_init,
+                        sidecar_gate_init_seed=self.config.model.sidecar_gate_init_seed,
                         tactile_fusion_mode=self.config.model.tactile_fusion_mode,
                         contact_num_tokens=self.config.model.contact_num_tokens,
                         contact_hidden_dim=self.config.model.contact_hidden_dim,
@@ -561,6 +564,19 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 ),
                 "local_patch_size": model.config.sidecar_local_patch_size,
                 "window_chunk_size": model.config.sidecar_window_chunk_size,
+                "gate_initialization": {
+                    "point": model.config.sidecar_point_gate_init,
+                    "action": model.config.sidecar_action_gate_init,
+                    "seed": model.config.sidecar_gate_init_seed,
+                },
+                "construction_gate_values": [
+                    {
+                        "stage": index,
+                        "point": getattr(stage, "initial_point_gate", None),
+                        "action": stage.initial_action_gate,
+                    }
+                    for index, stage in enumerate(dit.sidecar_stages)
+                ],
             }
 
         logging.debug(f"Model Config: {model.config}")

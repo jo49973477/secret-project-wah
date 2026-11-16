@@ -6,6 +6,12 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from gr00t.configs.sidecar_config import (
+    default_action_gate_init,
+    default_point_gate_init,
+    validate_gate_init,
+    validate_gate_init_seed,
+)
 from gr00t.model.extension.contact_input_moe import ContactInputAdapter
 from gr00t.model.extension.contact_surprise import ContactInjection, ContactSurprise
 from gr00t.model.extension.dit_lora import insert_dit_lora
@@ -32,6 +38,9 @@ class SidecarConditionedDiT(AlternateVLDiT):
         sidecar_hidden_dim=256,
         sidecar_num_heads=4,
         sidecar_num_point_tokens=32,
+        sidecar_point_gate_init=None,
+        sidecar_action_gate_init=None,
+        sidecar_gate_init_seed=42,
         tactile_fusion_mode="surprise",
         contact_num_tokens=4,
         contact_hidden_dim=256,
@@ -56,6 +65,21 @@ class SidecarConditionedDiT(AlternateVLDiT):
         )
         if sidecar_variant not in {"legacy", "multilevel_local"}:
             raise ValueError(f"Unknown sidecar_variant: {sidecar_variant}")
+        point_gate_init = validate_gate_init(
+            sidecar_point_gate_init,
+            default=default_point_gate_init,
+            name="sidecar_point_gate_init",
+        )
+        action_gate_init = validate_gate_init(
+            sidecar_action_gate_init,
+            default=default_action_gate_init,
+            name="sidecar_action_gate_init",
+        )
+        gate_init_seed = validate_gate_init_seed(sidecar_gate_init_seed)
+        if sidecar_variant == "multilevel_local" and point_gate_init["mode"] != "one":
+            raise ValueError(
+                "multilevel_local has no point gate; sidecar_point_gate_init.mode must remain 'one'"
+            )
         self.sidecar_variant = sidecar_variant
         self.sidecar_point_stage_names = list(sidecar_point_stage_names or [])
         if sidecar_variant == "legacy":
@@ -63,8 +87,16 @@ class SidecarConditionedDiT(AlternateVLDiT):
                 self.inner_dim, sidecar_hidden_dim, sidecar_num_point_tokens, sidecar_num_heads
             )
             self.sidecar_stages = nn.ModuleList(
-                PointActionStage(self.inner_dim, sidecar_hidden_dim, sidecar_num_heads)
-                for _ in self.stage_indices
+                PointActionStage(
+                    self.inner_dim,
+                    sidecar_hidden_dim,
+                    sidecar_num_heads,
+                    point_gate_init=point_gate_init,
+                    action_gate_init=action_gate_init,
+                    gate_init_seed=gate_init_seed,
+                    stage_index=stage,
+                )
+                for stage, _ in enumerate(self.stage_indices)
             )
         else:
             from gr00t.model.extension.multilevel_local_sidecar import LocalJointActionStage
@@ -91,9 +123,15 @@ class SidecarConditionedDiT(AlternateVLDiT):
                     sidecar_num_heads,
                     sidecar_local_patch_size,
                     sidecar_window_chunk_size,
+                    action_gate_init=action_gate_init,
+                    gate_init_seed=gate_init_seed,
+                    stage_index=stage,
                 )
-                for point_dim in sidecar_point_stage_dims
+                for stage, point_dim in enumerate(sidecar_point_stage_dims)
             )
+        self.sidecar_point_gate_init = point_gate_init
+        self.sidecar_action_gate_init = action_gate_init
+        self.sidecar_gate_init_seed = gate_init_seed
         self.contact_adapter = ContactSurprise(
             self.inner_dim,
             contact_hidden_dim,

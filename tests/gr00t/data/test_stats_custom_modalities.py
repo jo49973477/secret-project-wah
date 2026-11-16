@@ -81,7 +81,7 @@ def read_relative(path):
     return json.loads((path / "meta/relative_stats.json").read_text())
 
 
-@pytest.mark.parametrize("name,horizon", [("univtac_rgb", 16), ("univtac_full", 40)])
+@pytest.mark.parametrize("name,horizon", [("univtac_rgb", 16), ("univtac_full", 16)])
 def test_hydra_factory_initializes_custom_dataset(episode, monkeypatch, name, horizon):
     path, states, actions = episode
     monkeypatch.delitem(MODALITY_CONFIGS, TAG.value, raising=False)
