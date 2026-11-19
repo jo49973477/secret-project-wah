@@ -231,7 +231,7 @@ def forward_parity(reference, candidate, config, device="cpu", dtype=torch.float
         if hasattr(candidate, "sidecar_stages"):
             sensors["robot_state"] = torch.randn(1, 1, width, generator=generator).to(device, dtype)
             for stage in candidate.sidecar_stages:
-                stage.action_gate.zero_()
+                stage.set_injection_enabled("action", False)
             for injection in candidate.contact_injections:
                 injection.scale.zero_()
         else:

@@ -1,0 +1,40 @@
+# @package _global_
+defaults:
+- temporal_sidecar_ditlora-full
+- _self_
+name: actionnormal_tuned_temporal_sidecar_ditfull-full
+dit_training:
+  mode: full
+model:
+  tune_diffusion_model: true
+  freeze_pretrained_dit: false
+
+  sidecar_variant: legacy
+
+  # Gate initialization: original baseline
+  sidecar_point_gate_init:
+    mode: uniform
+    low: 0
+    high: 0.3
+  sidecar_action_gate_init:
+    mode: uniform
+    low: 0.7
+    high: 1.0
+
+# Training
+training:
+  point_encoder_learning_rate: 0.00001
+  action_head_learning_rate: 0.0001
+  max_steps: 10000
+  gradient_accumulation_steps: 1
+  wandb_group: pointonly-actionnormal-tuned-sidecar-ditfull
+
+# Hardware
+hardware:
+  global_batch_size: 32
+  gradient_accumulation_steps: 1
+
+# Monitoring
+trainctl:
+  enabled: true
+  message_mode: sopia

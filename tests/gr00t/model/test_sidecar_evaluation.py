@@ -18,7 +18,7 @@ import pytest
 import torch
 
 
-def tiny():
+def tiny(gate_mode="scalar"):
     return SidecarConditionedDiT(
         num_attention_heads=2,
         attention_head_dim=4,
@@ -35,6 +35,7 @@ def tiny():
         contact_hidden_dim=8,
         contact_num_tokens=2,
         tactile_fusion_mode="none",
+        sidecar_gate_mode=gate_mode,
     ).eval()
 
 
@@ -85,6 +86,21 @@ def test_context_skip_restore_mapping_and_parity():
     assert [r["block_index"] for r in gate_rows(model)] == model.stage_indices
     assert [r["block_number"] for r in gate_rows(model)] == [i + 1 for i in model.stage_indices]
     torch.testing.assert_close(model(**x), baseline, rtol=0, atol=0)
+
+
+def test_adaptive_stage_ablation_uses_effective_injection_and_restores():
+    model, x = tiny("adaptive"), inputs()
+    baseline = model(**x)
+    before = {key: value.clone() for key, value in model.state_dict().items()}
+    rows = gate_rows(model)
+    assert all(row["gate_mode"] == "adaptive" and row["action_gate"] is None for row in rows)
+    with intervention(model, zero_stages=[0]):
+        assert model.sidecar_stages[0]._action_injection_enabled is False
+        changed = model(**x)
+    assert not torch.equal(baseline, changed)
+    assert model.sidecar_stages[0]._action_injection_enabled is True
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(value, before[key], rtol=0, atol=0)
 
 
 def test_rng_comparisons_and_caller_state():

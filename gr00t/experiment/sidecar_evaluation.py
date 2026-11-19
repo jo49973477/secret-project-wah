@@ -86,27 +86,32 @@ def gate_rows(dit):
 
     if not hasattr(dit, "sidecar_stages"):
         raise ValueError("Diagnostics require SidecarConditionedDiT")
-    return [
-        dict(
-            stage=i,
-            block_index=block,
-            block_number=block + 1,
-            point_gate=float(full_value(stage.point_gate))
-            if hasattr(stage, "point_gate")
-            else None,
-            point_stage=getattr(dit, "sidecar_point_stage_names", [])[i]
-            if getattr(dit, "sidecar_variant", "legacy") == "multilevel_local"
-            else None,
-            point_gate_init_mode=stage.point_gate_init["mode"]
-            if hasattr(stage, "point_gate")
-            else None,
-            point_gate_initial_value=getattr(stage, "initial_point_gate", None),
-            action_gate=float(full_value(stage.action_gate)),
-            action_gate_init_mode=stage.action_gate_init["mode"],
-            action_gate_initial_value=stage.initial_action_gate,
+    rows = []
+    for i, (block, stage) in enumerate(zip(dit.stage_indices, dit.sidecar_stages)):
+        rows.append(
+            dict(
+                stage=i,
+                block_index=block,
+                block_number=block + 1,
+                gate_mode=getattr(stage, "gate_mode", "scalar"),
+                point_gate=float(full_value(stage.point_gate))
+                if hasattr(stage, "point_gate")
+                else None,
+                point_stage=getattr(dit, "sidecar_point_stage_names", [])[i]
+                if getattr(dit, "sidecar_variant", "legacy") == "multilevel_local"
+                else None,
+                point_gate_init_mode=stage.point_gate_init["mode"]
+                if hasattr(stage, "point_gate")
+                else None,
+                point_gate_initial_value=getattr(stage, "initial_point_gate", None),
+                action_gate=float(full_value(stage.action_gate))
+                if hasattr(stage, "action_gate")
+                else None,
+                action_gate_init_mode=stage.action_gate_init["mode"],
+                action_gate_initial_value=stage.initial_action_gate,
+            )
         )
-        for i, (block, stage) in enumerate(zip(dit.stage_indices, dit.sidecar_stages))
-    ]
+    return rows
 
 
 @contextmanager
@@ -152,10 +157,16 @@ def intervention(dit, *, disabled=False, zero_stages=(), rows=None):
 
     try:
         for i in zero_stages:
-            parameter = dit.sidecar_stages[i].action_gate
-            saved.append((parameter, parameter.detach().clone()))
-            with torch.no_grad():
-                parameter.zero_()
+            stage = dit.sidecar_stages[i]
+            if getattr(stage, "gate_mode", "scalar") == "adaptive":
+                previous_enabled = getattr(stage, "_action_injection_enabled", True)
+                saved.append(("enabled", stage, previous_enabled))
+                stage.set_injection_enabled("action", False)
+            else:
+                parameter = stage.action_gate
+                saved.append(("parameter", parameter, parameter.detach().clone()))
+                with torch.no_grad():
+                    parameter.zero_()
         if disabled:
             handles.append(dit.register_forward_pre_hook(remove_points, with_kwargs=True))
         if rows is not None:
@@ -167,9 +178,12 @@ def intervention(dit, *, disabled=False, zero_stages=(), rows=None):
         for handle in handles:
             handle.remove()
         dit._diagnostic_observer = previous
-        with torch.no_grad():
-            for parameter, value in saved:
-                parameter.copy_(value)
+        for kind, target, value in saved:
+            if kind == "enabled":
+                target.set_injection_enabled("action", value)
+            else:
+                with torch.no_grad():
+                    target.copy_(value)
 
 
 def offline_rows(path):

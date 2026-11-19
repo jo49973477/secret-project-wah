@@ -8,5 +8,6 @@ save_total_limit: 50
 gradient_accumulation_steps: 1
 
 enable_multimodal_diagnostics: true
+enable_gate_gradient_diagnostics: false
 multimodal_diagnostics_interval: 50
 multimodal_diagnostics_level: basic

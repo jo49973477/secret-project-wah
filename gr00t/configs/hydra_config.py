@@ -29,7 +29,9 @@ MODEL_FIELDS = frozenset(
     sidecar_variant sidecar_point_stage_names sidecar_local_patch_size sidecar_window_chunk_size
     sidecar_num_stages sidecar_stage_indices sidecar_hidden_dim sidecar_num_heads
     sidecar_num_point_tokens sidecar_point_gate_init sidecar_action_gate_init
-    sidecar_gate_init_seed tactile_fusion_mode contact_num_tokens contact_hidden_dim
+    sidecar_gate_init_seed sidecar_gate_mode sidecar_adaptive_gate_hidden_dim
+    sidecar_adaptive_gate_init_action sidecar_adaptive_gate_init_point
+    tactile_fusion_mode contact_num_tokens contact_hidden_dim
     contact_prediction_loss_weight freeze_pretrained_dit freeze_contact_teacher
     contact_injection_enabled contact_predictor_warmup
     dit_training_mode dit_lora_rank dit_lora_alpha dit_lora_dropout temporal_window_size
@@ -590,14 +592,27 @@ def preflight(cfg: DictConfig, config: Config) -> dict[str, Any]:
         },
         "sidecar": {
             "variant": m.sidecar_variant,
+            "gate_mode": m.sidecar_gate_mode,
+            "point_gate_status": (
+                "not present in multilevel_local" if m.sidecar_variant == "multilevel_local" else "enabled"
+            ),
             "point_stages": m.sidecar_point_stage_names,
             "dit_blocks": m.sidecar_stage_indices,
             "patch_size": m.sidecar_local_patch_size,
             "window_chunk_size": m.sidecar_window_chunk_size,
             "gate_initialization": {
-                "point": m.sidecar_point_gate_init,
+                "point": (
+                    None if m.sidecar_variant == "multilevel_local" else m.sidecar_point_gate_init
+                ),
                 "action": m.sidecar_action_gate_init,
                 "seed": m.sidecar_gate_init_seed,
+                "adaptive_hidden_dim": m.sidecar_adaptive_gate_hidden_dim,
+                "adaptive_action": m.sidecar_adaptive_gate_init_action,
+                "adaptive_point": (
+                    None
+                    if m.sidecar_variant == "multilevel_local"
+                    else m.sidecar_adaptive_gate_init_point
+                ),
             },
         },
         "conditioning": {

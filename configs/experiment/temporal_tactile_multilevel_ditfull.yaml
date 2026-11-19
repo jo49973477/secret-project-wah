@@ -1,0 +1,13 @@
+# @package _global_
+# Experiment C: temporal tactile history + Multi-Level Local Sidecar + scalar gate.
+defaults:
+- wah_multilevel_local_full
+- override /data: univtac_temporal5
+- _self_
+name: temporal_tactile_multilevel_ditfull
+temporal:
+  window_size: 5
+model:
+  sidecar_gate_mode: scalar
+training:
+  wandb_group: temporal-tactile-multilevel-ditfull

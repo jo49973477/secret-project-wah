@@ -14,7 +14,12 @@ from gr00t.configs.sidecar_config import (
     validate_checkpoint_variant as validate_checkpoint_variant,
     validate_variant as validate_variant,
 )
-from gr00t.model.extension.point_action_sidecar import gate_parameter
+from gr00t.model.extension.point_action_sidecar import (
+    AdaptiveGate,
+    gate_parameter,
+    gate_statistics,
+    masked_mean,
+)
 
 
 def snapshot_level(point, expected_dim):
@@ -70,6 +75,10 @@ class LocalJointActionStage(nn.Module):
         action_gate_init=None,
         gate_init_seed=42,
         stage_index=0,
+        gate_mode="scalar",
+        adaptive_gate_hidden_dim=128,
+        adaptive_gate_init_action=0.01,
+        temporal_context_dim=None,
     ):
         super().__init__()
         if min(patch_size, window_chunk_size, heads, dim) < 1 or dim % heads:
@@ -83,13 +92,33 @@ class LocalJointActionStage(nn.Module):
         self.qkv = nn.Linear(dim, 3 * dim)
         self.attention_projection = nn.Linear(dim, dim)
         self.output_projection = nn.Linear(dim, action_dim)
-        self.action_gate, self.initial_action_gate, self.action_gate_init = gate_parameter(
-            action_gate_init,
-            default=default_action_gate_init,
-            seed=gate_init_seed,
-            stage=stage_index,
-            kind="action",
+        self.context_projection = (
+            nn.Linear(temporal_context_dim, dim) if temporal_context_dim is not None else None
         )
+        self.gate_mode = gate_mode
+        if gate_mode == "scalar":
+            self.action_gate, self.initial_action_gate, self.action_gate_init = gate_parameter(
+                action_gate_init,
+                default=default_action_gate_init,
+                seed=gate_init_seed,
+                stage=stage_index,
+                kind="action",
+            )
+        elif gate_mode == "adaptive":
+            self.initial_action_gate = float(adaptive_gate_init_action)
+            self.action_gate_init = {"mode": "adaptive", "value": self.initial_action_gate}
+            self.action_gate_network = AdaptiveGate(
+                dim,
+                adaptive_gate_hidden_dim,
+                self.initial_action_gate,
+                seed=gate_init_seed,
+                stage=stage_index,
+                kind="action",
+            )
+        else:
+            raise ValueError(f"Unknown Sidecar gate mode: {gate_mode!r}")
+        self._action_injection_enabled = True
+        self.last_gate_values = {}
         self.last_diagnostics = {}
         # Window counts vary across ranks: gather once per stage, not per chunk.
         self._z3_leaf = True
@@ -111,6 +140,18 @@ class LocalJointActionStage(nn.Module):
         attended = attended.transpose(1, 2).reshape(tokens.shape)
         return self.attention_projection(attended)[:, :horizon]
 
+    def gate_parameters(self, kind):
+        if kind != "action":
+            return []
+        if self.gate_mode == "scalar":
+            return [self.action_gate]
+        return list(self.action_gate_network.parameters())
+
+    def set_injection_enabled(self, kind, enabled):
+        if kind != "action":
+            raise ValueError("multilevel_local has no point injection gate")
+        self._action_injection_enabled = bool(enabled)
+
     def forward(
         self,
         action,
@@ -121,6 +162,7 @@ class LocalJointActionStage(nn.Module):
         stage=0,
         *,
         checkpoint_activations=False,
+        gradient_observer=None,
     ):
         # The ZeRO leaf module's gather/release and backward hooks must surround
         # checkpointing, rather than being replayed by it. Replaying __call__
@@ -137,11 +179,23 @@ class LocalJointActionStage(nn.Module):
                 action_mask,
                 observer,
                 stage,
+                gradient_observer,
                 use_reentrant=False,
             )
-        return self._forward(action, level, point_mask, action_mask, observer, stage)
+        return self._forward(
+            action, level, point_mask, action_mask, observer, stage, gradient_observer
+        )
 
-    def _forward(self, action, level, point_mask=None, action_mask=None, observer=None, stage=0):
+    def _forward(
+        self,
+        action,
+        level,
+        point_mask=None,
+        action_mask=None,
+        observer=None,
+        stage=0,
+        gradient_observer=None,
+    ):
         if point_mask is not None:
             raise ValueError(
                 "Local stages use packed valid points and offsets, not a padded point mask"
@@ -156,12 +210,39 @@ class LocalJointActionStage(nn.Module):
         point = self.point_projection(feat.to(device=action.device, dtype=action.dtype))
         point = point + self.position_projection(coord.to(device=action.device, dtype=action.dtype))
         projected_action = self.action_projection(action)
+        context = level.get("temporal_context")
+        context_mask = level.get("temporal_context_mask")
+        if context is not None:
+            if self.context_projection is None:
+                raise ValueError("Temporal context was supplied to a non-temporal local stage")
+            if context.ndim != 3 or context.shape[0] != action.shape[0]:
+                raise ValueError("Temporal context must have shape [batch, tokens, width]")
+            context = self.context_projection(context.to(action.dtype))
+            if context_mask is None or context_mask.shape != context.shape[:2]:
+                raise ValueError("Temporal context mask shape mismatch")
+            context_mask = context_mask.bool()
+        elif self.context_projection is not None:
+            raise ValueError("Temporal local stage requires fused temporal context")
         order = level["serialized_order"][0].to(device=action.device, dtype=torch.long)
         counts = torch.diff(torch.cat((offset.new_zeros(1), offset)))
         if (counts <= 0).any() or int(offset[-1]) != len(feat) or order.numel() != len(feat):
             raise ValueError(
                 "Local attention requires positive point counts and offsets covering all points"
             )
+        point_pooled = []
+        pool_start = 0
+        for pool_end in offset.tolist():
+            point_pooled.append(point[pool_start:pool_end].mean(dim=0))
+            pool_start = pool_end
+        if self.gate_mode == "scalar":
+            action_gate = self.action_gate
+        else:
+            action_gate = self.action_gate_network.forward_pooled(
+                masked_mean(projected_action, action_mask), torch.stack(point_pooled)
+            )
+        if not self._action_injection_enabled:
+            action_gate = action_gate * 0
+        self.last_gate_values["action"] = action_gate.detach()
         outputs, counts_by_batch = [], []
         start = 0
         for batch, end in enumerate(offset.tolist()):
@@ -190,8 +271,15 @@ class LocalJointActionStage(nn.Module):
                     if action_mask is None
                     else action_mask[batch : batch + 1].bool().expand(len(values), -1)
                 )
-                valid = torch.cat((am, point_valid), dim=1)
-                update = self._joint(actions, values, valid)
+                joint_values = values
+                joint_valid = point_valid
+                if context is not None:
+                    repeated_context = context[batch : batch + 1].expand(len(values), -1, -1)
+                    repeated_context_mask = context_mask[batch : batch + 1].expand(len(values), -1)
+                    joint_values = torch.cat((repeated_context, values), dim=1)
+                    joint_valid = torch.cat((repeated_context_mask, point_valid), dim=1)
+                valid = torch.cat((am, joint_valid), dim=1)
+                update = self._joint(actions, joint_values, valid)
                 part = update.float().sum(0)
                 total = part if total is None else total + part
             outputs.append((total / windows).to(action.dtype))
@@ -199,20 +287,26 @@ class LocalJointActionStage(nn.Module):
         delta = self.output_projection(torch.stack(outputs))
         if action_mask is not None:
             delta = delta * action_mask[..., None].to(delta.dtype)
-        update = self.action_gate * delta
+        update = action_gate * delta
         result = action + update
+        if gradient_observer is not None:
+            gradient_observer(stage, delta, result, action_gate)
         if observer is not None:
             masked_action = (
                 action if action_mask is None else action * action_mask[..., None].to(action.dtype)
             )
             actual_residual = result - action
+            action_gate_mean, action_gate_std = gate_statistics(action_gate)
             self.last_diagnostics = dict(
+                gate_mode=self.gate_mode,
                 point_counts=[sum(c) for c in counts_by_batch],
                 window_counts=[len(c) for c in counts_by_batch],
                 window_point_counts=counts_by_batch,
                 point_feature_norm=float(feat.detach().float().norm()),
                 action_feature_norm=float(masked_action.detach().float().norm()),
-                action_gate=float(self.action_gate.detach()),
+                action_gate=action_gate_mean,
+                action_gate_value_mean=action_gate_mean,
+                action_gate_value_std=action_gate_std,
                 action_gate_initial_value=self.initial_action_gate,
                 action_pre_gate_update_norm=float(delta.detach().float().norm()),
                 action_update_norm=float(delta.detach().float().norm()),

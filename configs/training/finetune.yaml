@@ -36,5 +36,6 @@ discord_notify_error: true
 enable_training_dashboard: null
 dashboard_refresh_seconds: 1.0
 enable_multimodal_diagnostics: false
+enable_gate_gradient_diagnostics: false
 multimodal_diagnostics_interval: 50
 multimodal_diagnostics_level: basic

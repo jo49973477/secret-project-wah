@@ -74,6 +74,7 @@ class TrainingConfig:
     """Render an in-place terminal dashboard; None enables it only on a TTY."""
     dashboard_refresh_seconds: float = 1.0
     enable_multimodal_diagnostics: bool = False
+    enable_gate_gradient_diagnostics: bool = False
     multimodal_diagnostics_interval: int = 50
     multimodal_diagnostics_level: str = "basic"
     save_steps: int = 100
@@ -225,6 +226,12 @@ class TrainingConfig:
             raise ValueError("multimodal_diagnostics_interval must be positive")
         if self.multimodal_diagnostics_level not in {"off", "basic", "per_layer"}:
             raise ValueError("multimodal_diagnostics_level must be off, basic, or per_layer")
+        if self.enable_gate_gradient_diagnostics and (
+            not self.enable_multimodal_diagnostics or self.multimodal_diagnostics_level == "off"
+        ):
+            raise ValueError(
+                "enable_gate_gradient_diagnostics requires enabled multimodal diagnostics"
+            )
         if self.deepspeed_stage not in (2, 3):
             raise ValueError(f"deepspeed_stage must be 2 or 3, got {self.deepspeed_stage}")
         if self.zero3_sub_group_size is not None and self.zero3_sub_group_size <= 0:

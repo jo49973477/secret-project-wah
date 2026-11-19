@@ -150,6 +150,10 @@ if __name__ == "__main__":
     config.model.sidecar_point_gate_init = ft_config.sidecar_point_gate_init
     config.model.sidecar_action_gate_init = ft_config.sidecar_action_gate_init
     config.model.sidecar_gate_init_seed = ft_config.sidecar_gate_init_seed
+    config.model.sidecar_gate_mode = ft_config.sidecar_gate_mode
+    config.model.sidecar_adaptive_gate_hidden_dim = ft_config.sidecar_adaptive_gate_hidden_dim
+    config.model.sidecar_adaptive_gate_init_action = ft_config.sidecar_adaptive_gate_init_action
+    config.model.sidecar_adaptive_gate_init_point = ft_config.sidecar_adaptive_gate_init_point
     config.model.tactile_fusion_mode = ft_config.tactile_fusion_mode
     config.model.contact_num_tokens = ft_config.contact_num_tokens
     config.model.contact_hidden_dim = ft_config.contact_hidden_dim
@@ -236,6 +240,7 @@ if __name__ == "__main__":
     config.training.enable_training_dashboard = ft_config.enable_training_dashboard
     config.training.dashboard_refresh_seconds = ft_config.dashboard_refresh_seconds
     config.training.enable_multimodal_diagnostics = ft_config.enable_multimodal_diagnostics
+    config.training.enable_gate_gradient_diagnostics = ft_config.enable_gate_gradient_diagnostics
     config.training.multimodal_diagnostics_interval = ft_config.multimodal_diagnostics_interval
     config.training.multimodal_diagnostics_level = ft_config.multimodal_diagnostics_level
 

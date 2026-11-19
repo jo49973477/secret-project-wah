@@ -21,6 +21,7 @@ from gr00t.data.types import (
 from gr00t.experiment.wah_diagnostics import (
     cartesian_response,
     interrupted_by_sigterm,
+    load_closed_loop_outcomes,
     load_scene_metadata,
     main,
     parser,
@@ -324,6 +325,8 @@ def test_masked_actions_and_undefined_residuals():
     mask = np.array([[[1, 0, 0], [0, 0, 0]]])
     result = masked_action_metrics(a, b, mask)
     assert result["mae"] == result["rmse"] == 2
+    assert result["l2"] == 2
+    assert result["chunk_l2"] == [2]
     assert result["valid_elements"] == 1
     assert result["per_dimension_mae"] == [2, None, None]
     assert result["per_timestep_mae"] == [2, None]
@@ -837,3 +840,43 @@ def test_scene_metadata_rejects_nonfinite_json(cli_inputs):
     args = parser().parse_args([*cli_inputs, "--experiment", "point_ablation"])
     with pytest.raises(ValueError, match="Nonfinite JSON"):
         load_scene_metadata(args)
+
+
+def test_closed_loop_outcomes_keep_failure_and_error_separate(tmp_path):
+    rollout = tmp_path / "rollout"
+    rollout.mkdir()
+    (rollout / "summary.json").write_text(
+        json.dumps(
+            {
+                "task_order": ["lift_can"],
+                "episodes_per_task": 3,
+                "episodes": [
+                    {
+                        "task": "lift_can",
+                        "episode_index": 0,
+                        "success": True,
+                        "termination_reason": "success",
+                    },
+                    {
+                        "task": "lift_can",
+                        "episode_index": 1,
+                        "success": False,
+                        "termination_reason": "step_limit",
+                    },
+                    {
+                        "task": "lift_can",
+                        "episode_index": 2,
+                        "success": None,
+                        "termination_reason": "exception",
+                    },
+                ],
+            }
+        )
+    )
+    rows = load_closed_loop_outcomes(
+        [f"original={rollout}"], ["original", "disabled"], tmp_path / "report"
+    )
+    overall = rows[0]["overall"]
+    assert (overall["successes"], overall["failures"], overall["errors"]) == (1, 1, 1)
+    assert overall["success_rate"] == pytest.approx(0.5)
+    assert overall["error_rate"] == pytest.approx(1 / 3)

@@ -230,6 +230,9 @@ class Gr00tTrainer(Trainer):
         dashboard_enabled = kwargs.pop("enable_training_dashboard", None)
         dashboard_refresh_seconds = kwargs.pop("dashboard_refresh_seconds", 1.0)
         self.enable_multimodal_diagnostics = kwargs.pop("enable_multimodal_diagnostics", False)
+        self.enable_gate_gradient_diagnostics = kwargs.pop(
+            "enable_gate_gradient_diagnostics", False
+        )
         diagnostics_level = kwargs.pop("multimodal_diagnostics_level", "basic")
         self.multimodal_diagnostics_interval = kwargs.pop("multimodal_diagnostics_interval", 50)
         super().__init__(*args, **kwargs)
@@ -282,7 +285,10 @@ class Gr00tTrainer(Trainer):
             from gr00t.experiment.multimodal_diagnostics import MultimodalDiagnostics
 
             self.multimodal_monitor = MultimodalDiagnostics(
-                self, self.multimodal_diagnostics_interval, diagnostics_level
+                self,
+                self.multimodal_diagnostics_interval,
+                diagnostics_level,
+                enable_gate_gradient_diagnostics=self.enable_gate_gradient_diagnostics,
             )
             self.add_callback(self.multimodal_monitor)
 
@@ -893,6 +899,11 @@ class Gr00tTrainer(Trainer):
             monitor.dit._diagnostic_observer = (
                 monitor.observe if model.training and monitor.sampled() else None
             )
+            monitor.dit._diagnostic_gradient_observer = (
+                monitor.observe_gate_gradients
+                if model.training and monitor.sampled() and monitor.enable_gate_gradient_diagnostics
+                else None
+            )
         try:
             loss, outputs = super().compute_loss(
                 model,
@@ -903,6 +914,7 @@ class Gr00tTrainer(Trainer):
         finally:
             if monitor is not None and monitor.dit is not None:
                 monitor.dit._diagnostic_observer = None
+                monitor.dit._diagnostic_gradient_observer = None
         output_dict = outputs if isinstance(outputs, dict) else getattr(outputs, "__dict__", {})
         diagnostics = output_dict.get("diagnostics", {}) if model.training else {}
         for name, value in diagnostics.items():

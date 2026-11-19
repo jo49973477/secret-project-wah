@@ -297,9 +297,10 @@ def test_optional_diagnostics_do_not_change_predictions():
         optimizer=optimizer,
         state=SimpleNamespace(global_step=0),
     )
-    monitor = MultimodalDiagnostics(trainer, interval=1)
+    monitor = MultimodalDiagnostics(trainer, interval=1, enable_gate_gradient_diagnostics=True)
     before = m(**x)
     m._diagnostic_observer = monitor.observe
+    m._diagnostic_gradient_observer = monitor.observe_gate_gradients
     after = m(**x)
     torch.testing.assert_close(before, after, rtol=0, atol=0)
     (after.square().mean() + m.contact_prediction_loss).backward()
@@ -313,6 +314,14 @@ def test_optional_diagnostics_do_not_change_predictions():
     assert monitor.record["sidecar/action_actual_residual_norm"] == 0
     assert monitor.record["contact_prediction_loss"] >= 0
     assert "sidecar_point_residual_ratio_stage_0" in monitor.record
+    assert monitor.record["grad_activation/action_pre_gate_status_stage_0"] == "exact_zero"
+    assert monitor.record["grad_activation/action_downstream_stage_0"] > 0
+    assert monitor.record["grad_activation/action_norm_ratio_stage_0"] == 0
+    assert monitor.record["grad_norm/sidecar_action_projection_stage_0"] == 0
+    assert monitor.record["grad_norm/sidecar_action_attention_stage_0"] == 0
+    assert monitor.record["gate/action_value_std_stage_0"] == 0
+    assert monitor.record["grad_status/sidecar_action_projection_stage_0/in_optimizer"] is True
+    assert monitor.record["grad_status/sidecar_action_projection_stage_0/magnitude"] == "exact_zero"
     monitor.post_step()
 
 

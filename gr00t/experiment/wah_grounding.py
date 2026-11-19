@@ -1,7 +1,9 @@
 """Training-free WAH interventions, paired inference and geometry diagnostics.
 
-Only action gates are temporarily changed. Sensor removal is deliberately not an
-intervention: ContactSurprise may also consume the original scene points.
+Only effective action injections are temporarily disabled. Scalar gates are
+restored and adaptive parameters are never rewritten. Sensor removal is
+deliberately not an intervention: ContactSurprise may also consume the original
+scene points.
 """
 
 from __future__ import annotations
@@ -55,17 +57,31 @@ def stage_mapping(dit):
         raise ValueError("Missing multilevel point-stage mapping")
     result = []
     for index, (block, stage) in enumerate(zip(indices, stages)):
-        row = dict(stage=index, block_index=block, block_number=block + 1, variant=variant)
-        for name in ("point_gate", "action_gate"):
-            gate = getattr(stage, name, None)
-            if gate is None and name == "action_gate":
-                raise ValueError(f"Stage {index} has no action_gate")
+        mode = getattr(stage, "gate_mode", "scalar")
+        row = dict(
+            stage=index,
+            block_index=block,
+            block_number=block + 1,
+            variant=variant,
+            gate_mode=mode,
+        )
+        for kind in ("point", "action"):
+            gate = getattr(stage, f"{kind}_gate", None)
             if gate is not None and (gate.numel() != 1 or not torch.isfinite(gate).all()):
-                raise ValueError(f"Stage {index} has an invalid scalar {name}")
-            row[name] = None if gate is None else float(gate.detach().float().cpu())
-        row["point_gate_status"] = "unavailable" if row["point_gate"] is None else "available"
+                raise ValueError(f"Stage {index} has an invalid scalar {kind}_gate")
+            if gate is None and kind == "action" and not hasattr(stage, "action_gate_network"):
+                raise ValueError(f"Stage {index} has no action gate implementation")
+            row[f"{kind}_gate"] = None if gate is None else float(gate.detach().float().cpu())
+            row[f"{kind}_gate_initial_value"] = getattr(stage, f"initial_{kind}_gate", None)
+        row["point_gate_status"] = (
+            "unavailable"
+            if variant == "multilevel_local"
+            else "sample_dependent"
+            if mode == "adaptive"
+            else "available"
+        )
         row["point_gate_reason"] = (
-            "This variant has no point_gate" if row["point_gate"] is None else None
+            "This variant has no point gate" if variant == "multilevel_local" else None
         )
         row["point_stage"] = names[index] if variant == "multilevel_local" else None
         result.append(row)
@@ -134,7 +150,21 @@ def sidecar_intervention(dit, *, zero_stages=(), swapped_points=None, rows=None)
         call = calls.get(key, 0)
         calls[key] = call + 1
         row = dict(mapping[index], kind=kind, forward_call=call)
-        row["action_gate"] = float(dit.sidecar_stages[index].action_gate.detach().float().cpu())
+        stage_module = dit.sidecar_stages[index]
+        values = getattr(stage_module, "last_gate_values", {}).get("action")
+        if values is None and hasattr(stage_module, "action_gate"):
+            values = stage_module.action_gate
+        if values is not None:
+            values = values.detach().float()
+            row["action_gate"] = float(values.mean())
+            row["action_gate_mean"] = float(values.mean())
+            row["action_gate_std"] = float(values.std(unbiased=False))
+        point_values = getattr(stage_module, "last_gate_values", {}).get("point")
+        if point_values is not None:
+            point_values = point_values.detach().float()
+            row["point_gate"] = float(point_values.mean())
+            row["point_gate_mean"] = float(point_values.mean())
+            row["point_gate_std"] = float(point_values.std(unbiased=False))
         row.update(observed_residual(features, delta, am if kind == "sidecar_action" else pm))
         rows.append(row)
 
@@ -156,10 +186,16 @@ def sidecar_intervention(dit, *, zero_stages=(), swapped_points=None, rows=None)
 
     try:
         for index in zero_stages:
-            gate = dit.sidecar_stages[index].action_gate
-            saved.append((gate, gate.detach().clone()))
-            with torch.no_grad():
-                gate.zero_()
+            stage = dit.sidecar_stages[index]
+            if getattr(stage, "gate_mode", "scalar") == "adaptive":
+                previous_enabled = getattr(stage, "_action_injection_enabled", True)
+                saved.append(("enabled", stage, previous_enabled))
+                stage.set_injection_enabled("action", False)
+            else:
+                gate = stage.action_gate
+                saved.append(("parameter", gate, gate.detach().clone()))
+                with torch.no_grad():
+                    gate.zero_()
         if swapped_points is not None and mapping[0]["variant"] == "legacy":
             handles.append(dit.sidecar_pool.register_forward_pre_hook(swap_pool, with_kwargs=True))
         for index, stage in enumerate(dit.sidecar_stages):
@@ -187,9 +223,12 @@ def sidecar_intervention(dit, *, zero_stages=(), swapped_points=None, rows=None)
                 dit._diagnostic_observer = previous
             else:
                 del dit._diagnostic_observer
-        with torch.no_grad():
-            for gate, value in saved:
-                gate.copy_(value)
+        for kind, target, value in saved:
+            if kind == "enabled":
+                target.set_injection_enabled("action", value)
+            else:
+                with torch.no_grad():
+                    target.copy_(value)
 
 
 def masked_action_metrics(original, changed, mask):
@@ -213,6 +252,8 @@ def masked_action_metrics(original, changed, mask):
     return dict(
         mae=float(abs(diff).sum() / valid.sum()),
         rmse=float(np.sqrt(np.square(diff).sum() / valid.sum())),
+        l2=float(np.linalg.norm(diff.reshape(-1))),
+        chunk_l2=np.linalg.norm(diff.reshape(a.shape[0], -1), axis=1).tolist(),
         valid_elements=int(valid.sum()),
         per_dimension_mae=by_axis((0, 1)),
         per_timestep_mae=by_axis((0, 2)),

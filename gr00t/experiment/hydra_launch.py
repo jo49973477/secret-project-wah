@@ -102,6 +102,7 @@ def resolve_resume(cfg: DictConfig, config) -> Path | None:
         "enable_training_dashboard",
         "dashboard_refresh_seconds",
         "enable_multimodal_diagnostics",
+        "enable_gate_gradient_diagnostics",
         "multimodal_diagnostics_interval",
         "multimodal_diagnostics_level",
     }
@@ -117,6 +118,10 @@ def resolve_resume(cfg: DictConfig, config) -> Path | None:
                 "sidecar_point_gate_init": default_point_gate_init(),
                 "sidecar_action_gate_init": default_action_gate_init(),
                 "sidecar_gate_init_seed": 42,
+                "sidecar_gate_mode": "scalar",
+                "sidecar_adaptive_gate_hidden_dim": 128,
+                "sidecar_adaptive_gate_init_action": 0.01,
+                "sidecar_adaptive_gate_init_point": 0.8,
             }
             for key, value in defaults.items():
                 before.setdefault(key, value)

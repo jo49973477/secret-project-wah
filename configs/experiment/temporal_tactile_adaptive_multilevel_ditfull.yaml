@@ -1,0 +1,10 @@
+# @package _global_
+# Experiment F: temporal tactile history + Multi-Level Local Sidecar + adaptive action gates.
+defaults:
+- temporal_tactile_multilevel_ditfull
+- _self_
+name: temporal_tactile_adaptive_multilevel_ditfull
+model:
+  sidecar_gate_mode: adaptive
+training:
+  wandb_group: temporal-tactile-adaptive-multilevel-ditfull

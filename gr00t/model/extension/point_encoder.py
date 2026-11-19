@@ -822,7 +822,7 @@ class ConcertoPointEncoder(nn.Module):
             )
         return names, dimensions
 
-    def forward_multilevel(self, points, point_mask=None, *, stage_names):
+    def forward_multilevel(self, points, point_mask=None, *, stage_names, return_final=False):
         """Extract stage boundaries in one backbone forward, preserving gradients.
 
         Decoder unpooling can mutate parent Point objects. Snapshot only the
@@ -844,13 +844,14 @@ class ConcertoPointEncoder(nn.Module):
             modules = dict(self.backbone.enc.named_children())
             for name, dim in zip(names, dimensions):
                 handles.append(modules[name].register_forward_hook(capture(name, dim)))
-            self.forward(points, point_mask)
+            final = self.forward(points, point_mask, return_mask=return_final)
         finally:
             for handle in handles:
                 handle.remove()
         if set(levels) != set(names):
             raise RuntimeError(f"Concerto did not emit all requested encoder stages: {names}")
-        return {name: levels[name] for name in names}
+        ordered = {name: levels[name] for name in names}
+        return (ordered, *final) if return_final else ordered
 
     def backbone_parameters(self):
         """Return only pretrained backbone parameters for optimizer LR grouping."""

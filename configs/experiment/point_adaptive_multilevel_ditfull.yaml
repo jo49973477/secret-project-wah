@@ -1,0 +1,13 @@
+# @package _global_
+# Experiment E: non-temporal Multi-Level Local Sidecar with adaptive action gates.
+defaults:
+- wah_multilevel_local_full
+- override /data: univtac_pointonly
+- _self_
+name: point_adaptive_multilevel_ditfull
+model:
+  sidecar_gate_mode: adaptive
+  use_tactile_conditioning: false
+  tune_tactile_encoder: false
+training:
+  wandb_group: point-adaptive-multilevel-ditfull

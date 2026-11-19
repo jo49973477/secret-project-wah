@@ -1,0 +1,10 @@
+# @package _global_
+# Experiment B: point-only Single-Level Sidecar with sample-dependent gates.
+defaults:
+- pointonly_sidecar_ditfull
+- _self_
+name: point_adaptive_sidecar_ditfull
+model:
+  sidecar_gate_mode: adaptive
+training:
+  wandb_group: point-adaptive-sidecar-ditfull

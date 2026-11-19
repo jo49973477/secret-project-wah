@@ -22,6 +22,10 @@ sidecar_action_gate_init:
   mean: 0.02
   std: 0.01
 sidecar_gate_init_seed: 42
+sidecar_gate_mode: scalar
+sidecar_adaptive_gate_hidden_dim: 128
+sidecar_adaptive_gate_init_action: 0.01
+sidecar_adaptive_gate_init_point: 0.8
 tactile_fusion_mode: surprise
 contact_num_tokens: 4
 contact_hidden_dim: 256

@@ -132,6 +132,10 @@ def initialize_missing_sidecar(model, missing_keys):
                 action_gate_init=getattr(cfg, "sidecar_action_gate_init", None),
                 gate_init_seed=getattr(cfg, "sidecar_gate_init_seed", 42),
                 stage_index=stage,
+                gate_mode=getattr(cfg, "sidecar_gate_mode", "scalar"),
+                adaptive_gate_hidden_dim=getattr(cfg, "sidecar_adaptive_gate_hidden_dim", 128),
+                adaptive_gate_init_action=getattr(cfg, "sidecar_adaptive_gate_init_action", 0.01),
+                adaptive_gate_init_point=getattr(cfg, "sidecar_adaptive_gate_init_point", 0.8),
             )
             for stage, _ in enumerate(dit.sidecar_stages)
         ),
@@ -179,6 +183,12 @@ def initialize_missing_sidecar(model, missing_keys):
                 action_gate_init=getattr(cfg, "sidecar_action_gate_init", None),
                 gate_init_seed=getattr(cfg, "sidecar_gate_init_seed", 42),
                 stage_index=stage,
+                gate_mode=getattr(cfg, "sidecar_gate_mode", "scalar"),
+                adaptive_gate_hidden_dim=getattr(cfg, "sidecar_adaptive_gate_hidden_dim", 128),
+                adaptive_gate_init_action=getattr(cfg, "sidecar_adaptive_gate_init_action", 0.01),
+                temporal_context_dim=(
+                    dit.inner_dim if getattr(cfg, "temporal_window_size", 0) else None
+                ),
             )
             for stage, dim in enumerate(dimensions)
         )

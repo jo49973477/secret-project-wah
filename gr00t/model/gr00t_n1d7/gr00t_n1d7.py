@@ -153,6 +153,11 @@ class Gr00tN1d7ActionHead(nn.Module):
                 sidecar_point_gate_init=config.sidecar_point_gate_init,
                 sidecar_action_gate_init=config.sidecar_action_gate_init,
                 sidecar_gate_init_seed=config.sidecar_gate_init_seed,
+                sidecar_gate_mode=config.sidecar_gate_mode,
+                sidecar_adaptive_gate_hidden_dim=config.sidecar_adaptive_gate_hidden_dim,
+                sidecar_adaptive_gate_init_action=config.sidecar_adaptive_gate_init_action,
+                sidecar_adaptive_gate_init_point=config.sidecar_adaptive_gate_init_point,
+                temporal_window_size=config.temporal_window_size,
                 tactile_fusion_mode=config.tactile_fusion_mode,
                 contact_num_tokens=config.contact_num_tokens,
                 contact_hidden_dim=config.contact_hidden_dim,
@@ -609,9 +614,17 @@ class Gr00tN1d7ActionHead(nn.Module):
                 indices = range(window) if need_seed else (window - 1,)
             else:
                 indices = range(window)
-            point_frames, point_masks, tactile_frames = [], [], []
+            point_frames, point_masks, tactile_frames, level_frames = [], [], [], []
             for index in indices:
-                encoded, mask = self.point_encoder(points[:, index], return_mask=True)
+                if self.config.sidecar_variant == "multilevel_local":
+                    levels, encoded, mask = self.point_encoder.forward_multilevel(
+                        points[:, index],
+                        stage_names=self.config.sidecar_point_stage_names,
+                        return_final=True,
+                    )
+                    level_frames.append(levels)
+                else:
+                    encoded, mask = self.point_encoder(points[:, index], return_mask=True)
                 point_frames.append(encoded)
                 point_masks.append(mask)
                 tactile_frames.append(self.tactile_encoder(tactile[:, index : index + 2]))
@@ -678,6 +691,20 @@ class Gr00tN1d7ActionHead(nn.Module):
                     "features/fused_norm": masked_feature_norm_mean(fused, fused_mask),
                     "temporal/valid_frame_ratio": valid.detach().float().mean(),
                 }
+            if self.config.sidecar_variant == "multilevel_local":
+                current_levels = level_frames[-1]
+                return (
+                    {
+                        name: {
+                            **level,
+                            "temporal_context": fused.to(level["feat"].dtype),
+                            "temporal_context_mask": fused_mask,
+                        }
+                        for name, level in current_levels.items()
+                    },
+                    None,
+                    None,
+                )
             current_points = point_frames[-1]
             current_mask = point_masks[-1]
             return (

@@ -1,5 +1,6 @@
 """Opt-in evolving sidecar. Original DiT modules retain their names and implementation."""
 
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
@@ -9,6 +10,7 @@ import torch.nn.functional as F
 from gr00t.configs.sidecar_config import (
     default_action_gate_init,
     default_point_gate_init,
+    validate_adaptive_gate_config,
     validate_gate_init,
     validate_gate_init_seed,
 )
@@ -41,6 +43,11 @@ class SidecarConditionedDiT(AlternateVLDiT):
         sidecar_point_gate_init=None,
         sidecar_action_gate_init=None,
         sidecar_gate_init_seed=42,
+        sidecar_gate_mode="scalar",
+        sidecar_adaptive_gate_hidden_dim=128,
+        sidecar_adaptive_gate_init_action=0.01,
+        sidecar_adaptive_gate_init_point=0.8,
+        temporal_window_size=0,
         tactile_fusion_mode="surprise",
         contact_num_tokens=4,
         contact_hidden_dim=256,
@@ -76,9 +83,24 @@ class SidecarConditionedDiT(AlternateVLDiT):
             name="sidecar_action_gate_init",
         )
         gate_init_seed = validate_gate_init_seed(sidecar_gate_init_seed)
+        gate_mode, adaptive_hidden_dim, adaptive_action, adaptive_point = (
+            validate_adaptive_gate_config(
+                SimpleNamespace(
+                    sidecar_gate_mode=sidecar_gate_mode,
+                    sidecar_adaptive_gate_hidden_dim=sidecar_adaptive_gate_hidden_dim,
+                    sidecar_adaptive_gate_init_action=sidecar_adaptive_gate_init_action,
+                    sidecar_adaptive_gate_init_point=sidecar_adaptive_gate_init_point,
+                )
+            )
+        )
         if sidecar_variant == "multilevel_local" and point_gate_init["mode"] != "one":
             raise ValueError(
                 "multilevel_local has no point gate; sidecar_point_gate_init.mode must remain 'one'"
+            )
+        if sidecar_variant == "multilevel_local" and adaptive_point != 0.8:
+            raise ValueError(
+                "multilevel_local has no point gate; adaptive point initialization is unused "
+                "and must remain 0.8"
             )
         self.sidecar_variant = sidecar_variant
         self.sidecar_point_stage_names = list(sidecar_point_stage_names or [])
@@ -95,6 +117,10 @@ class SidecarConditionedDiT(AlternateVLDiT):
                     action_gate_init=action_gate_init,
                     gate_init_seed=gate_init_seed,
                     stage_index=stage,
+                    gate_mode=gate_mode,
+                    adaptive_gate_hidden_dim=adaptive_hidden_dim,
+                    adaptive_gate_init_action=adaptive_action,
+                    adaptive_gate_init_point=adaptive_point,
                 )
                 for stage, _ in enumerate(self.stage_indices)
             )
@@ -126,12 +152,20 @@ class SidecarConditionedDiT(AlternateVLDiT):
                     action_gate_init=action_gate_init,
                     gate_init_seed=gate_init_seed,
                     stage_index=stage,
+                    gate_mode=gate_mode,
+                    adaptive_gate_hidden_dim=adaptive_hidden_dim,
+                    adaptive_gate_init_action=adaptive_action,
+                    temporal_context_dim=self.inner_dim if temporal_window_size else None,
                 )
                 for stage, point_dim in enumerate(sidecar_point_stage_dims)
             )
         self.sidecar_point_gate_init = point_gate_init
         self.sidecar_action_gate_init = action_gate_init
         self.sidecar_gate_init_seed = gate_init_seed
+        self.sidecar_gate_mode = gate_mode
+        self.sidecar_adaptive_gate_hidden_dim = adaptive_hidden_dim
+        self.sidecar_adaptive_gate_init_action = adaptive_action
+        self.sidecar_adaptive_gate_init_point = adaptive_point
         self.contact_adapter = ContactSurprise(
             self.inner_dim,
             contact_hidden_dim,
@@ -387,6 +421,7 @@ class SidecarConditionedDiT(AlternateVLDiT):
                             action_mask,
                             getattr(self, "_diagnostic_observer", None),
                             stage,
+                            getattr(self, "_diagnostic_gradient_observer", None),
                         )
                     else:
                         name = self.sidecar_point_stage_names[stage]
@@ -401,6 +436,7 @@ class SidecarConditionedDiT(AlternateVLDiT):
                         action, _ = self.sidecar_stages[stage](
                             *local_args,
                             checkpoint_activations=self.gradient_checkpointing,
+                            gradient_observer=getattr(self, "_diagnostic_gradient_observer", None),
                         )
                 if contact_tokens is not None and self.contact_injection_enabled:
                     before_contact = action

@@ -45,6 +45,16 @@ def parser():
         help="Verified episode scene/object provenance JSON; defaults to meta/wah_diagnostics.json",
     )
     result.add_argument(
+        "--rollout-result",
+        action="append",
+        default=[],
+        metavar="CONDITION=DIR",
+        help=(
+            "Attach an existing UniVTAC closed-loop result to a diagnostic condition; "
+            "repeat for multiple conditions"
+        ),
+    )
+    result.add_argument(
         "--wandb", action="store_true", help="Opt into a separate W&B inference run"
     )
     result.add_argument("--wandb-project", default="wah-univtac")
@@ -89,6 +99,46 @@ def validate_args(args):
         args.scene_metadata = args.scene_metadata.expanduser().resolve()
         if not args.scene_metadata.is_file():
             raise ValueError(f"Scene metadata not found: {args.scene_metadata}")
+    for specification in args.rollout_result:
+        if "=" not in specification:
+            raise ValueError("--rollout-result must use CONDITION=DIR")
+        condition, directory = specification.split("=", 1)
+        if not condition or not Path(directory).expanduser().is_dir():
+            raise ValueError(f"Invalid --rollout-result: {specification}")
+
+
+def load_closed_loop_outcomes(specifications, conditions, output_dir):
+    """Read authoritative rollout artifacts without mixing them with frame metrics."""
+    from examples.UniVTAC.univtac_rollout.reporting.analytics import episode_summary, task_summaries
+    from examples.UniVTAC.univtac_rollout.reporting.parser import load_run
+
+    results = []
+    seen = set()
+    for specification in specifications:
+        condition, directory = specification.split("=", 1)
+        if condition not in conditions:
+            raise ValueError(
+                f"Rollout condition {condition!r} is not one of the active conditions: {conditions}"
+            )
+        if condition in seen:
+            raise ValueError(f"Duplicate closed-loop result for condition {condition!r}")
+        seen.add(condition)
+        run = load_run(directory, label=condition, output_dir=output_dir)
+        results.append(
+            {
+                "condition": condition,
+                "run_dir": str(run.root),
+                "source": run.source,
+                "overall": episode_summary(run.episodes),
+                "tasks": task_summaries(run),
+                "warnings": run.warnings,
+                "interpretation": (
+                    "Success, failure, and error are separate closed-loop outcomes; "
+                    "errors are excluded from the success-rate denominator."
+                ),
+            }
+        )
+    return results
 
 
 @contextmanager
@@ -322,6 +372,9 @@ def evaluate(args, report, dashboard, tracker, policy_factory=None, loader_facto
         if args.experiment == "point_ablation"
         else ["original", *[f"zero_stage_{i}" for i in range(len(gates))], "zero_all"]
     )
+    report.summary["closed_loop_outcomes"] = load_closed_loop_outcomes(
+        args.rollout_result, conditions, report.output
+    )
     report.summary.update(gates=gates, scene_metadata=metadata_path, scene_provenance=metadata)
     report.summary["config"].update(
         checkpoint_identity=policy.checkpoint_identity,
@@ -490,6 +543,21 @@ def evaluate(args, report, dashboard, tracker, policy_factory=None, loader_facto
                     else dict(status="skipped", reason=geometry["reason"])
                 )
                 geometry["cartesian_response"] = spatial
+                if spatial["status"] == "available":
+                    object_delta = np.asarray(geometry["object_displacement_xyz_m"], dtype=float)
+                    action_delta = np.asarray(
+                        spatial["mean_action_displacement_xyz_m"], dtype=float
+                    )
+                    denominator = np.linalg.norm(object_delta) * np.linalg.norm(action_delta)
+                    geometry["geometry_alignment_cosine"] = (
+                        float(np.dot(object_delta, action_delta) / denominator)
+                        if denominator > 0
+                        else None
+                    )
+                    geometry["geometry_alignment_interpretation"] = (
+                        "Directional EEF response to the swapped object displacement; "
+                        "not a task-success or grounding-correctness score"
+                    )
                 if spatial["status"] != "available":
                     report.issue("cartesian_response", spatial["reason"], sample=number)
             else:
@@ -509,7 +577,7 @@ def evaluate(args, report, dashboard, tracker, policy_factory=None, loader_facto
         [r for r in report.samples if r.get("mae") is not None and r["space"] == "normalized"]
     )
     for gate in gates:
-        if gate["point_gate"] is None:
+        if gate["point_gate_status"] == "unavailable":
             report.issue("point_gate", gate["point_gate_reason"], stage=gate["stage"])
 
 

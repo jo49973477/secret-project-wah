@@ -20,7 +20,7 @@ def aggregate_actions(rows):
         grouped[(row["task"], row["comparison"], row["space"])].append(row)
     result = []
     for (task, comparison, space), group in sorted(grouped.items()):
-        for metric in ("mae", "rmse"):
+        for metric in ("mae", "rmse", "l2"):
             stats = finite_stats([r.get(metric) for r in group])
             result.append(
                 dict(
@@ -144,7 +144,12 @@ class DiagnosticReport:
         self.summary["action_summary"] = aggregate_actions(self.samples)
         self.summary["stage_summary"] = aggregate_stages(self.stages)
         geometry_summary = []
-        for metric in ("object_displacement_m", "normalized_action_mae", "normalized_mae_per_m"):
+        for metric in (
+            "object_displacement_m",
+            "normalized_action_mae",
+            "normalized_mae_per_m",
+            "geometry_alignment_cosine",
+        ):
             stats = finite_stats([r.get(metric) for r in self.geometry])
             geometry_summary.append(
                 dict(
@@ -157,6 +162,19 @@ class DiagnosticReport:
             )
         self.summary["geometry_summary"] = geometry_summary
         summary_rows = [*self.summary["action_summary"], *geometry_summary]
+        for result in self.summary.get("closed_loop_outcomes", []):
+            summary_rows.append(
+                dict(
+                    section="closed_loop",
+                    condition=result["condition"],
+                    task="all",
+                    **result["overall"],
+                )
+            )
+            summary_rows.extend(
+                dict(section="closed_loop", condition=result["condition"], **task)
+                for task in result["tasks"]
+            )
         for stage in self.summary["stage_summary"]:
             for metric in (
                 "point_gate",

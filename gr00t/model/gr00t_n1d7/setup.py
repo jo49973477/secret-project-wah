@@ -346,6 +346,10 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                         sidecar_point_gate_init=self.config.model.sidecar_point_gate_init,
                         sidecar_action_gate_init=self.config.model.sidecar_action_gate_init,
                         sidecar_gate_init_seed=self.config.model.sidecar_gate_init_seed,
+                        sidecar_gate_mode=self.config.model.sidecar_gate_mode,
+                        sidecar_adaptive_gate_hidden_dim=self.config.model.sidecar_adaptive_gate_hidden_dim,
+                        sidecar_adaptive_gate_init_action=self.config.model.sidecar_adaptive_gate_init_action,
+                        sidecar_adaptive_gate_init_point=self.config.model.sidecar_adaptive_gate_init_point,
                         tactile_fusion_mode=self.config.model.tactile_fusion_mode,
                         contact_num_tokens=self.config.model.contact_num_tokens,
                         contact_hidden_dim=self.config.model.contact_hidden_dim,
@@ -568,6 +572,10 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     "point": model.config.sidecar_point_gate_init,
                     "action": model.config.sidecar_action_gate_init,
                     "seed": model.config.sidecar_gate_init_seed,
+                    "mode": model.config.sidecar_gate_mode,
+                    "adaptive_hidden_dim": model.config.sidecar_adaptive_gate_hidden_dim,
+                    "adaptive_action": model.config.sidecar_adaptive_gate_init_action,
+                    "adaptive_point": model.config.sidecar_adaptive_gate_init_point,
                 },
                 "construction_gate_values": [
                     {

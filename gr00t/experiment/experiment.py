@@ -549,6 +549,7 @@ def run(config: Config):
         enable_training_dashboard=config.training.enable_training_dashboard,
         dashboard_refresh_seconds=config.training.dashboard_refresh_seconds,
         enable_multimodal_diagnostics=config.training.enable_multimodal_diagnostics,
+        enable_gate_gradient_diagnostics=config.training.enable_gate_gradient_diagnostics,
         multimodal_diagnostics_interval=config.training.multimodal_diagnostics_interval,
         multimodal_diagnostics_level=config.training.multimodal_diagnostics_level,
     )

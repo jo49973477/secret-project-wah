@@ -5,6 +5,7 @@ from numbers import Real
 
 
 GATE_INIT_MODES = frozenset({"zero", "one", "constant", "uniform", "normal"})
+SIDECAR_GATE_MODES = frozenset({"scalar", "adaptive"})
 
 
 def default_point_gate_init():
@@ -58,7 +59,32 @@ def validate_gate_init_seed(seed):
     return seed
 
 
+def validate_adaptive_gate_config(config):
+    mode = getattr(config, "sidecar_gate_mode", "scalar")
+    if mode not in SIDECAR_GATE_MODES:
+        raise ValueError(
+            f"sidecar_gate_mode must be one of {sorted(SIDECAR_GATE_MODES)}; got {mode!r}"
+        )
+    hidden_dim = getattr(config, "sidecar_adaptive_gate_hidden_dim", 128)
+    if isinstance(hidden_dim, bool) or not isinstance(hidden_dim, int) or hidden_dim < 1:
+        raise ValueError("sidecar_adaptive_gate_hidden_dim must be a positive integer")
+    values = {}
+    for label, default in (("action", 0.01), ("point", 0.8)):
+        name = f"sidecar_adaptive_gate_init_{label}"
+        value = getattr(config, name, default)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not math.isfinite(value)
+            or not 0 < value < 1
+        ):
+            raise ValueError(f"{name} must be a finite real number strictly between 0 and 1")
+        values[label] = float(value)
+    return mode, hidden_dim, values["action"], values["point"]
+
+
 def validate_gate_initialization(config):
+    _, _, _, adaptive_point = validate_adaptive_gate_config(config)
     point = validate_gate_init(
         getattr(config, "sidecar_point_gate_init", None),
         default=default_point_gate_init,
@@ -75,6 +101,11 @@ def validate_gate_initialization(config):
         raise ValueError(
             "multilevel_local has no point gate; model.sidecar_point_gate_init.mode must remain "
             "'one' (the legacy compatibility default)"
+        )
+    if variant == "multilevel_local" and adaptive_point != 0.8:
+        raise ValueError(
+            "multilevel_local has no point gate; "
+            "model.sidecar_adaptive_gate_init_point must remain the compatibility default 0.8"
         )
     return point, action, seed
 
@@ -110,14 +141,12 @@ def validate_variant(config):
         "concerto_base",
     }:
         raise ValueError("multilevel_local requires a Concerto encoder")
-    if (
-        config.temporal_window_size
-        or config.contact_input_mode != "none"
-        or config.tactile_fusion_mode != "none"
-    ):
+    if config.contact_input_mode != "none" or config.tactile_fusion_mode != "none":
         raise ValueError(
-            "multilevel_local currently requires temporal=0, contact_input_mode=none, tactile_fusion_mode=none"
+            "multilevel_local requires contact_input_mode=none and tactile_fusion_mode=none"
         )
+    if config.temporal_window_size and not config.use_tactile_conditioning:
+        raise ValueError("Temporal multilevel_local requires tactile conditioning")
     if config.contact_prediction_loss_weight or config.contact_predictor_warmup:
         raise ValueError("multilevel_local does not support Contact prediction losses or warmup")
     if config.sidecar_local_patch_size < 1 or config.sidecar_window_chunk_size < 1:
@@ -150,6 +179,17 @@ def validate_checkpoint_variant(checkpoint, requested):
         raise ValueError(
             f"Incompatible Sidecar checkpoint variant: {old} -> {new}; start from NVIDIA GR00T for a new architecture"
         )
+    old_gate_mode = getattr(checkpoint, "sidecar_gate_mode", "scalar")
+    new_gate_mode = getattr(requested, "sidecar_gate_mode", "scalar")
+    if old_gate_mode != new_gate_mode:
+        raise ValueError(
+            "Incompatible Sidecar gate mode: "
+            f"{old_gate_mode} -> {new_gate_mode}; adaptive/scalar conversion must be explicit"
+        )
+    if old_gate_mode == "adaptive" and getattr(
+        checkpoint, "sidecar_adaptive_gate_hidden_dim", 128
+    ) != getattr(requested, "sidecar_adaptive_gate_hidden_dim", 128):
+        raise ValueError("Incompatible adaptive Sidecar gate hidden dimension")
     if old == "multilevel_local":
         for key in (
             "sidecar_point_stage_names",

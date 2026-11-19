@@ -116,6 +116,10 @@ class Gr00tN1d7Config(PretrainedConfig):
     sidecar_point_gate_init: dict = field(default_factory=default_point_gate_init)
     sidecar_action_gate_init: dict = field(default_factory=default_action_gate_init)
     sidecar_gate_init_seed: int = 42
+    sidecar_gate_mode: str = "scalar"
+    sidecar_adaptive_gate_hidden_dim: int = 128
+    sidecar_adaptive_gate_init_action: float = 0.01
+    sidecar_adaptive_gate_init_point: float = 0.8
     tactile_fusion_mode: str = "surprise"
     contact_num_tokens: int = 4
     contact_hidden_dim: int = 256

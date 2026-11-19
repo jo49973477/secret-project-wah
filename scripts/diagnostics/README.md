@@ -62,7 +62,7 @@ are selected; episode boundary padding is not introduced.
 
 `summary.json`, `sample_metrics.csv`, and `stage_metrics.csv` contain provenance,
 gates, zero-based block indices, one-based block numbers, per-call residual norms,
-ratios and cosines, and action MAE/RMSE, dimension/timestep MAE and per-chunk L2.
+ratios and cosines, and action MAE/RMSE/L2, dimension/timestep MAE and per-chunk L2.
 Normalized metrics include the checkpoint padded action layout. Decoded metrics
 are separate per named action field, in checkpoint/dataset native units; mixed
 joint/gripper dimensions are not combined into a physical-distance claim.
@@ -88,8 +88,10 @@ UniVTAC processor/collator, `get_action`, and `processor.decode_action`. It neve
 starts a Trainer, exports weights, saves model parameters, or invokes Git.
 Use complete local inference checkpoints, including exports produced by
 `scripts/export_zero3_checkpoint.py`. Raw/live ZeRO-3 partitions are rejected
-with export instructions. Both `legacy` and `multilevel_local` Sidecars are
-supported; the latter has no `point_gate`, which is reported as N/A.
+with export instructions. Both `legacy` and `multilevel_local` Sidecars and both
+`scalar` and `adaptive` gate modes are supported. Multi-Level Local has no point
+gate, which is reported as N/A. Adaptive stage ablations disable the effective
+injection; they do not mutate or assume the existence of a scalar gate.
 
 From the repository root, in the existing environment:
 
@@ -101,9 +103,11 @@ uv run --no-sync python scripts/diagnostics/evaluate_wah_grounding.py \
   --experiment point_ablation \
   --checkpoint "$CKPT" --dataset-path "$DATASET" \
   --task lift_can --num-samples 100 --seed 42 --device cuda:0 \
+  --rollout-result original=/path/to/original_rollout \
+  --rollout-result disabled=/path/to/disabled_rollout \
   --output-dir outputs/diagnostics/7_1_1
 
-# 7.1.2: baseline, each stage action_gate=0, all action_gates=0
+# 7.1.2: baseline, each stage injection disabled, all stage injections disabled
 uv run --no-sync python scripts/diagnostics/evaluate_wah_grounding.py \
   --experiment gate_diagnostics \
   --checkpoint "$CKPT" --dataset-path "$DATASET" \
@@ -121,10 +125,18 @@ guess task identities from file paths. CPU is accepted via `--device cpu`,
 although actual Concerto/sparse model dependencies may require CUDA; the unit
 tests use small CPU modules instead of a full checkpoint.
 
+`--rollout-result CONDITION=DIR` is optional and repeatable. It reads the
+current UniVTAC `summary.json` schema (with the documented CSV/worker fallback)
+and adds closed-loop Success / Failure / Error counts without treating errors
+as task failures or mixing rollout episodes with offline frame samples. The CLI
+does not launch the simulator; conditions must come from separately executed,
+protocol-matched rollouts.
+
 ### What the interventions measure
 
-- **7.1.1:** all three unordered condition pairs are compared. `disabled` sets
-  every Sidecar **action_gate** to zero temporarily. Point encoders, point
+- **7.1.1:** all three unordered condition pairs are compared. `disabled`
+  temporarily disables every Sidecar action injection (scalar gates are restored;
+  adaptive gate parameters are never rewritten). Point encoders, point
   evolution, tactile, point-dependent ContactSurprise, and input MoE remain
   active. This differs from the older `evaluate_sidecar.py` token-removal mode.
   For `swapped`, only the donor cloud replaces the source cloud during donor
@@ -133,8 +145,10 @@ tests use small CPU modules instead of a full checkpoint.
   multilevel local stages. DiT/contact/MoE continue receiving the original
   sensor inputs. Temporal Sidecars receive donor-point-derived fused tokens
   computed using the original tactile and state histories.
-- **7.1.2:** reads the actual runtime `stage_indices`, scalar gate values and
-  point-level mapping. Existing forward observer callbacks measure **A** and
+- **7.1.2:** reads the actual runtime `stage_indices`, gate mode/statistics and
+  point-level mapping. Scalar checkpoints report parameter values; adaptive
+  checkpoints report per-forward sample gate mean/std. Existing forward
+  observer callbacks measure **A** and
   the actual gated **delta A** immediately before addition; no residual is
   reconstructed by subtracting final activations. Records FP32 Frobenius norms,
   `||delta A|| / ||A||`, and `cos(A, delta A)` over valid tokens for every stage
@@ -227,6 +241,12 @@ report mean decoded XYZ response across valid timesteps. This is still a
 response metric, not accuracy against a verified desired action. The CLI does
 not assume an EEF contract for `default` or joint-space formats.
 
+When both that verified EEF response and verified source/donor object XYZ are
+available in the same frame, the report also records their directional cosine
+as `geometry_alignment_cosine`. It is the response direction under a mismatched
+scene cloud, not a success score or proof of correct grounding. Zero-length
+vectors remain N/A.
+
 ### Terminal and local reports
 
 The terminal uses the project's Rich `Live` / `Panel` / `Table` conventions,
@@ -294,6 +314,53 @@ series, stage and geometry tables, available bar/scatter PNGs, and a
 `diagnostic_sample` and `diagnostic_stage` axes; no `training_step` is used.
 Offline runs stay local under the output directory until the user explicitly
 syncs them. `--wandb-mode disabled` does not import or initialize W&B.
+
+## Adaptive gate training configurations
+
+Experiment A already exists as `temporal_sidecar_ditfull-full` (temporal tactile,
+Single-Level Sidecar, scalar gates). The additional DiT-full configurations are:
+
+- B: `point_adaptive_sidecar_ditfull`
+- C: `temporal_tactile_multilevel_ditfull`
+- D: `temporal_tactile_adaptive_sidecar_ditfull`
+- E: `point_adaptive_multilevel_ditfull`
+- F: `temporal_tactile_adaptive_multilevel_ditfull`
+
+Resolve a configuration without starting training:
+
+```bash
+uv run --no-sync python scripts/train_hydra.py \
+  --config-name experiment/temporal_tactile_adaptive_multilevel_ditfull \
+  --cfg job --resolve
+```
+
+Start a selected run with the full UniVTAC dataset explicitly supplied:
+
+```bash
+FLORENCE_DATASET=/path/to/full_univtac \
+uv run --no-sync python scripts/train_hydra.py \
+  --config-name experiment/point_adaptive_sidecar_ditfull
+```
+
+Adaptive defaults are `hidden_dim=128`, action gate `0.01`, and point gate
+`0.8`. Override, for example, with
+`model.sidecar_adaptive_gate_init_action=0.02`. Initial values must be strictly
+between zero and one because they initialize a sigmoid bias; outputs are not
+hard-clamped. Scalar configs retain their existing learnable parameters and
+initialization behavior.
+
+Sample activation gradients only at the configured diagnostic interval:
+
+```bash
+training.enable_multimodal_diagnostics=true \
+training.multimodal_diagnostics_level=per_layer \
+training.multimodal_diagnostics_interval=50 \
+training.enable_gate_gradient_diagnostics=true
+```
+
+The activation hooks report pre-gate residual and downstream gradient
+norms/status without retaining the graph. Live ZeRO-3 parameter norms continue
+to use the existing safe local/full gradient accessors.
 
 CPU contract tests (no checkpoints, training, simulator, W&B service or Git):
 

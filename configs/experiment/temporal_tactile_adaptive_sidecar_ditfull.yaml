@@ -1,0 +1,11 @@
+# @package _global_
+# Experiment D: existing temporal tactile Single-Level Sidecar with adaptive gates.
+defaults:
+- temporal_sidecar_ditfull-full
+- _self_
+name: temporal_tactile_adaptive_sidecar_ditfull
+model:
+  sidecar_variant: legacy
+  sidecar_gate_mode: adaptive
+training:
+  wandb_group: temporal-tactile-adaptive-sidecar-ditfull
