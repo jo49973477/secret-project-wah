@@ -37,4 +37,4 @@ hardware:
 # Monitoring
 trainctl:
   enabled: true
-  message_mode: sopia
+  message_mode: koyori
